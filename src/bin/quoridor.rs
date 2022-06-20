@@ -1,36 +1,33 @@
-use quoridor::draw_unicode_box;
+use quoridor::Action;
 use quoridor::FenceOrientation;
+use quoridor::GameState;
+use quoridor::Player;
 use std::io::Write;
 
 fn main() {
-    let vertical_label = ['9', '8', '7', '6', '5', '4', '3', '2', '1'];
-    let horizontal_label = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'];
-    std::io::stdout()
-        .lock()
-        .write_all(
-            draw_unicode_box(
-                &horizontal_label,
-                &vertical_label,
-                |r, c| {
-                    if r == 0 && c == 4 {
-                        '■'
-                    } else if r == 8 && c == 4 {
-                        '○'
-                    } else {
-                        ' '
-                    }
-                },
-                |r, c| {
-                    if r == 0 && c == 0 {
-                        Some(FenceOrientation::Horizontal)
-                    } else if r == 7 && c == 7 {
-                        Some(FenceOrientation::Vertical)
-                    } else {
-                        None
-                    }
-                },
-            )
-            .as_bytes(),
-        )
-        .unwrap();
+    let mut gs = GameState::new();
+    std::io::stdout().lock().write_all(gs.draw().as_bytes()).unwrap();
+    let actions = [
+        Action::Move((7, 4)),
+        Action::Move((1, 4)),
+        Action::Move((6, 4)),
+        Action::Move((2, 4)),
+        Action::Move((5, 4)),
+        Action::Move((3, 4)),
+        Action::Fence((3, 3, FenceOrientation::Horizontal)),
+        Action::Move((3, 3)),
+    ];
+    for (i, a) in actions.iter().enumerate() {
+        let player = if i % 2 == 0 { Player::Player1 } else { Player::Player2 };
+        match gs.perform_action(player, *a) {
+            None => {
+                eprintln!("invalid action");
+                break;
+            }
+            Some(new_gs) => {
+                gs = new_gs;
+                std::io::stdout().lock().write_all(gs.draw().as_bytes()).unwrap();
+            }
+        }
+    }
 }
