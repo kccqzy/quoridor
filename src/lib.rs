@@ -108,5 +108,44 @@ pub fn draw_unicode_box(
         out.push_str(if c == 0 { "  " } else { "   " });
         out.push(horizontal_label[c]);
     }
+    out.push('\n');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simple_drawing() {
+        assert_eq!(
+            draw_unicode_box(&['1'], &['a'], |_, _| ' ', |_, _| None),
+            concat!(
+                "┌───┐\n", //
+                "│   │ a\n",     //
+                "└───┘\n", //
+                "  1\n"
+            )
+        );
+        assert_eq!(
+            draw_unicode_box(&['1', '2'], &['a'], |_, _| ' ', |_, _| None),
+            concat!(
+                "┌───┬───┐\n", //
+                "│   │   │ a\n",           //
+                "└───┴───┘\n", //
+                "  1   2\n"
+            )
+        );
+        assert_eq!(
+            draw_unicode_box(&['1', '2'], &['x', 'y'], |_, _| ' ', |_, _| None),
+            concat!(
+                "┌───┬───┐\n", //
+                "│   │   │ x\n",           //
+                "├───┼───┤\n", //
+                "│   │   │ y\n",           //
+                "└───┴───┘\n", //
+                "  1   2\n"
+            )
+        );
+    }
 }
