@@ -10,12 +10,15 @@ pub fn draw_unicode_box(
     canonical_fence: impl Fn(usize, usize) -> Option<FenceOrientation>,
 ) -> String {
     let vertical_fence_left = |r: usize, c: usize| {
-        // A vertical fence left of (r,c) exists iff canonical fence (r,c-1) or (r-1,c-1)
+        // A vertical fence left of (r,c) exists iff canonical fence (r,c-1) or
+        // (r-1,c-1).
         c > 0
             && (canonical_fence(r, c - 1) == Some(FenceOrientation::Vertical)
                 || r > 0 && canonical_fence(r - 1, c - 1) == Some(FenceOrientation::Vertical))
     };
     let horizontal_fence_top = |r: usize, c: usize| {
+        // A horizontal fence on top of (r,c) exists iff canonical fence (r-1,c) or
+        // (r-1,c-1).
         r > 0
             && (canonical_fence(r - 1, c) == Some(FenceOrientation::Horizontal)
                 || c > 0 && canonical_fence(r - 1, c - 1) == Some(FenceOrientation::Horizontal))
@@ -27,8 +30,10 @@ pub fn draw_unicode_box(
     assert!(width > 0);
     let mut out = String::new();
     for r in 0..height {
-        // Draw the top-border.
         for c in 0..width {
+            // Draw the top-left corner of each cell. This may be the top-left
+            // corner of the whole grid, the topmost row, the leftmost column,
+            // or an interior cell.
             out.push(if r == 0 && c == 0 {
                 '┌'
             } else if r == 0 {
@@ -68,9 +73,10 @@ pub fn draw_unicode_box(
                     (true, true, true, true) => '╋',
                 }
             });
+            // Draw the top border of the cell.
             out.push_str(if horizontal_fence_top(r, c) { "━━━" } else { "───" });
         }
-        // Draw right border
+        // Draw the rightmost border of the grid at the top of each cell.
         out.push(if r == 0 {
             '┐'
         } else if horizontal_fence_top(r, width - 1) {
@@ -79,19 +85,21 @@ pub fn draw_unicode_box(
             '┤'
         });
         out.push('\n');
-        // Draw the middle
+        // Draw the middle of each cell.
         for c in 0..width {
             out.push(if vertical_fence_left(r, c) { '┃' } else { '│' });
             out.push(' ');
             out.push(in_box_label(r, c));
             out.push(' ');
         }
+        // Draw the rightmost border of the grid in the middle. After a sapce, draw the
+        // vertical labels.
         out.push('│');
         out.push(' ');
         out.push(vertical_label[r]);
         out.push('\n');
     }
-    // Draw the bottom
+    // Draw the bottommost border of the grid.
     for c in 0..width {
         out.push(if c == 0 {
             '└'
@@ -103,7 +111,7 @@ pub fn draw_unicode_box(
         out.push_str("───");
     }
     out.push_str("┘\n");
-    // Draw the horizontal labels
+    // Draw the horizontal labels.
     for c in 0..width {
         out.push_str(if c == 0 { "  " } else { "   " });
         out.push(horizontal_label[c]);
