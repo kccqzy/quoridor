@@ -1,5 +1,8 @@
 use std::rc::Rc;
 
+const BOARD_WIDTH: u8 = 9;
+const BOARD_HEIGHT: u8 = 9;
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum FenceOrientation {
     Vertical = 0,
@@ -14,14 +17,16 @@ pub fn draw_unicode_box(
         // A vertical fence left of (r,c) exists iff canonical fence (r,c-1) or
         // (r-1,c-1).
         c > 0
-            && (canonical_fence(r, c - 1) == Some(FenceOrientation::Vertical)
+            && (r < BOARD_HEIGHT - 1
+                && canonical_fence(r, c - 1) == Some(FenceOrientation::Vertical)
                 || r > 0 && canonical_fence(r - 1, c - 1) == Some(FenceOrientation::Vertical))
     };
     let horizontal_fence_top = |r: u8, c: u8| {
         // A horizontal fence on top of (r,c) exists iff canonical fence (r-1,c) or
         // (r-1,c-1).
         r > 0
-            && (canonical_fence(r - 1, c) == Some(FenceOrientation::Horizontal)
+            && (c < BOARD_WIDTH - 1
+                && canonical_fence(r - 1, c) == Some(FenceOrientation::Horizontal)
                 || c > 0 && canonical_fence(r - 1, c - 1) == Some(FenceOrientation::Horizontal))
     };
 
@@ -194,30 +199,76 @@ impl Direction {
 }
 
 #[derive(Debug, Clone)]
-pub struct GameState {
-    fences: Rc<Vec<([u8; 2], FenceOrientation)>>,
-    width: u8,
-    height: u8,
-    location: [[u8; 2]; 2],
+struct FenceState {
+    /// The fences placed as a bit set.
+    fences: [u64; 2],
+    /// The number of fences remaining for each player.
     fences_remaining: [u8; 2],
+}
+
+impl FenceState {
+    fn new() -> FenceState {
+        FenceState { fences: [0; 2], fences_remaining: [10; 2] }
+    }
+    fn get(&self, [r, c]: [u8; 2]) -> Option<FenceOrientation> {
+        assert!(r < BOARD_HEIGHT - 1 && c < BOARD_WIDTH - 1, "location out of bounds {},{}", r, c);
+        let index = r * (BOARD_WIDTH - 1) + c;
+        if self.fences[FenceOrientation::Vertical as usize] & (1 << index) != 0 {
+            Some(FenceOrientation::Vertical)
+        } else if self.fences[FenceOrientation::Horizontal as usize] & (1 << index) != 0 {
+            Some(FenceOrientation::Horizontal)
+        } else {
+            None
+        }
+    }
+    fn remaining(&self, player: Player) -> u8 {
+        self.fences_remaining[player as usize]
+    }
+    fn has(&self, loc @ [fr, fc]: [u8; 2], o: FenceOrientation) -> bool {
+        fr < BOARD_HEIGHT - 1 && fc < BOARD_WIDTH - 1 && self.get(loc) == Some(o)
+    }
+    fn try_place_fence(
+        this: &mut Rc<Self>, player: Player, (loc @ [r, c], o): ([u8; 2], FenceOrientation),
+    ) -> std::result::Result<(), &'static str> {
+        if !(r < BOARD_HEIGHT - 1 && c < BOARD_WIDTH - 1) {
+            Err("cannot place fences on a border or outside the boundary")
+        } else if this.remaining(player) == 0 {
+            Err("no more remaining fences")
+        } else if this.get(loc).is_some() {
+            Err("cannot place fence on top of or intersecting an existing fence")
+        } else {
+            let mut potential_overlap = [loc, loc];
+            potential_overlap[0][o as usize] += 1;
+            potential_overlap[1][o as usize] = potential_overlap[1][o as usize].wrapping_add(255);
+            if potential_overlap.into_iter().any(|floc| this.has(floc, o)) {
+                Err("cannot place fence that overlaps with an existing fence")
+            } else {
+                let inner: &mut Self = Rc::make_mut(this);
+                let index = r * (BOARD_WIDTH - 1) + c;
+                inner.fences[o as usize] |= 1 << index;
+                inner.fences_remaining[player as usize] -= 1;
+                Ok(())
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GameState {
+    fence_state: Rc<FenceState>,
+    location: [[u8; 2]; 2],
 }
 
 impl GameState {
     pub fn new() -> GameState {
-        GameState {
-            width: 9,
-            height: 9,
-            fences: Rc::new(vec![]),
-            location: [[8, 4], [0, 4]],
-            fences_remaining: [10, 10],
-        }
+        GameState { fence_state: Rc::new(FenceState::new()), location: [[8, 4], [0, 4]] }
     }
 
     pub fn draw(&self, show_next_moves: bool) -> String {
-        assert_eq!(self.width, 9, "cannot draw nonstandard boards");
-        assert_eq!(self.height, 9, "cannot draw nonstandard boards");
-        let vertical_label = ['9', '8', '7', '6', '5', '4', '3', '2', '1'];
-        let horizontal_label = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'];
+        let vertical_label: [char; BOARD_HEIGHT as usize] =
+            ['9', '8', '7', '6', '5', '4', '3', '2', '1'];
+        let horizontal_label: [char; BOARD_WIDTH as usize] =
+            ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'];
         let player_1_symbol = '■';
         let player_2_symbol = '●';
         let player_1_next_symbol = '□';
@@ -242,16 +293,12 @@ impl GameState {
                     ' '
                 }
             },
-            |r, c| self.fences.iter().find(|&&(frc, _)| frc == [r, c]).map(|&(_, o)| o),
+            |r, c| self.fence_state.get([r, c]),
         )
     }
 
     pub fn is_game_complete(&self) -> bool {
-        self.location[0][0] == 0 || self.location[1][0] == self.height - 1
-    }
-
-    fn is_within_bound(&self, loc: [u8; 2]) -> bool {
-        return loc[0] < self.height && loc[1] < self.width;
+        self.location[0][0] == 0 || self.location[1][0] == BOARD_HEIGHT - 1
     }
 
     fn is_move_fence_free(
@@ -277,14 +324,15 @@ impl GameState {
         // Along the transverse axis of the fence, the move is
         // blocked if the top-left corner of the fence is the same
         // as the minimum of old and new location.
-        let is_fence_free = self.is_within_bound(new_loc)
-            && !self.fences.iter().any(|&(floc, fo)| {
-                fo == blocking_fence_orientation
-                    && (floc[fo as usize] == old_loc[fo as usize]
-                        || floc[fo as usize] + 1 == old_loc[fo as usize])
-                    && floc[1 - fo as usize]
-                        == std::cmp::min(old_loc[1 - fo as usize], new_loc[1 - fo as usize])
-            });
+        let mut blocking_fences: [[u8; 2]; 2] = [[0; 2]; 2];
+        let fo = blocking_fence_orientation;
+        blocking_fences[0][fo as usize] = old_loc[fo as usize];
+        blocking_fences[0][1 - fo as usize] =
+            std::cmp::min(old_loc[1 - fo as usize], new_loc[1 - fo as usize]);
+        blocking_fences[1][fo as usize] = old_loc[fo as usize].wrapping_add(255);
+        blocking_fences[1][1 - fo as usize] = blocking_fences[0][1 - fo as usize];
+        let is_fence_free = !blocking_fences.into_iter().any(|floc| self.fence_state.has(floc, fo));
+
         if is_fence_free {
             Some(new_loc)
         } else {
@@ -341,25 +389,12 @@ impl GameState {
                     Err("the location of the move is not allowed")
                 }
             }
-            Action::Fence(new_fence @ (new_fence_loc @ [rr, cc], _)) => {
-                if !(rr < self.height - 1 && cc < self.width - 1) {
-                    Err("cannot place fences on a border or outside the boundary")
-                } else if self.fences_remaining[player as usize] == 0 {
-                    Err("no more remaining fences")
-                } else if self.fences.iter().any(|&(floc, _)| floc == new_fence_loc) {
-                    Err("cannot place fence on top of or intersecting an existing fence")
-                } else if self.fences.iter().any(|&(floc, fo)| {
-                    (floc[fo as usize] as i8 - new_fence_loc[fo as usize] as i8).abs() == 1
-                        && floc[1 - fo as usize] == new_fence_loc[1 - fo as usize]
-                }) {
-                    Err("cannot place fence that overlaps with an existing fence")
-                } else {
-                    // TODO: reachability check
-                    let mut new_state = self.clone();
-                    new_state.fences_remaining[player as usize] -= 1;
-                    Rc::make_mut(&mut new_state.fences).push(new_fence);
-                    Ok(new_state)
-                }
+            Action::Fence(new_fence) => {
+                let mut new_state = self.clone();
+                FenceState::try_place_fence(&mut new_state.fence_state, player, new_fence)?;
+                // TODO: reachability check
+
+                Ok(new_state)
             }
         }
     }
