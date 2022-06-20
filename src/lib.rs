@@ -1,12 +1,10 @@
-use std::io::Write;
-
 #[derive(PartialEq, Eq)]
-enum FenceOrientation {
+pub enum FenceOrientation {
     Horizontal,
     Vertical,
 }
 
-fn draw_unicode_box(
+pub fn draw_unicode_box(
     horizontal_label: &[char], vertical_label: &[char],
     in_box_label: impl Fn(usize, usize) -> char,
     canonical_fence: impl Fn(usize, usize) -> Option<FenceOrientation>,
@@ -111,37 +109,4 @@ fn draw_unicode_box(
         out.push(horizontal_label[c]);
     }
     out
-}
-
-fn main() {
-    let vertical_label = ['9', '8', '7', '6', '5', '4', '3', '2', '1'];
-    let horizontal_label = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'];
-    std::io::stdout()
-        .lock()
-        .write_all(
-            draw_unicode_box(
-                &horizontal_label,
-                &vertical_label,
-                |r, c| {
-                    if r == 0 && c == 4 {
-                        '■'
-                    } else if r == 8 && c == 4 {
-                        '○'
-                    } else {
-                        ' '
-                    }
-                },
-                |r, c| {
-                    if r == 0 && c == 0 {
-                        Some(FenceOrientation::Horizontal)
-                    } else if r == 7 && c == 7 {
-                        Some(FenceOrientation::Vertical)
-                    } else {
-                        None
-                    }
-                },
-            )
-            .as_bytes(),
-        )
-        .unwrap();
 }
