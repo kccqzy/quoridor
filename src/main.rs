@@ -8,6 +8,7 @@ enum FenceOrientation {
 
 fn draw_unicode_box(
     horizontal_label: &[char], vertical_label: &[char],
+    in_box_label: impl Fn(usize, usize) -> char,
     canonical_fence: impl Fn(usize, usize) -> Option<FenceOrientation>,
 ) -> String {
     let vertical_fence_left = |r: usize, c: usize| {
@@ -83,7 +84,9 @@ fn draw_unicode_box(
         // Draw the middle
         for c in 0..width {
             out.push(if vertical_fence_left(r, c) { '┃' } else { '│' });
-            out.push_str("   ");
+            out.push(' ');
+            out.push(in_box_label(r, c));
+            out.push(' ');
         }
         out.push('│');
         out.push(' ');
@@ -116,15 +119,28 @@ fn main() {
     std::io::stdout()
         .lock()
         .write_all(
-            draw_unicode_box(&horizontal_label, &vertical_label, |r, c| {
-                if r == 0 && c == 0 {
-                    Some(FenceOrientation::Horizontal)
-                } else if r == 7 && c == 7 {
-                    Some(FenceOrientation::Vertical)
-                } else {
-                    None
-                }
-            })
+            draw_unicode_box(
+                &horizontal_label,
+                &vertical_label,
+                |r, c| {
+                    if r == 0 && c == 4 {
+                        '■'
+                    } else if r == 8 && c == 4 {
+                        '○'
+                    } else {
+                        ' '
+                    }
+                },
+                |r, c| {
+                    if r == 0 && c == 0 {
+                        Some(FenceOrientation::Horizontal)
+                    } else if r == 7 && c == 7 {
+                        Some(FenceOrientation::Vertical)
+                    } else {
+                        None
+                    }
+                },
+            )
             .as_bytes(),
         )
         .unwrap();
