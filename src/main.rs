@@ -7,20 +7,23 @@ enum FenceOrientation {
 }
 
 fn draw_unicode_box(
-    width: u8, height: u8, canonical_fence: impl Fn(u8, u8) -> Option<FenceOrientation>,
+    horizontal_label: &[char], vertical_label: &[char],
+    canonical_fence: impl Fn(usize, usize) -> Option<FenceOrientation>,
 ) -> String {
-    let vertical_fence_left = |r: u8, c: u8| {
+    let vertical_fence_left = |r: usize, c: usize| {
         // A vertical fence left of (r,c) exists iff canonical fence (r,c-1) or (r-1,c-1)
         c > 0
             && (canonical_fence(r, c - 1) == Some(FenceOrientation::Vertical)
                 || r > 0 && canonical_fence(r - 1, c - 1) == Some(FenceOrientation::Vertical))
     };
-    let horizontal_fence_top = |r: u8, c: u8| {
+    let horizontal_fence_top = |r: usize, c: usize| {
         r > 0
             && (canonical_fence(r - 1, c) == Some(FenceOrientation::Horizontal)
                 || c > 0 && canonical_fence(r - 1, c - 1) == Some(FenceOrientation::Horizontal))
     };
 
+    let width = horizontal_label.len();
+    let height = vertical_label.len();
     assert!(height > 0);
     assert!(width > 0);
     let mut out = String::new();
@@ -82,7 +85,10 @@ fn draw_unicode_box(
             out.push(if vertical_fence_left(r, c) { '┃' } else { '│' });
             out.push_str("   ");
         }
-        out.push_str("│\n");
+        out.push('│');
+        out.push(' ');
+        out.push(vertical_label[r]);
+        out.push('\n');
     }
     // Draw the bottom
     for c in 0..width {
@@ -96,15 +102,21 @@ fn draw_unicode_box(
         out.push_str("───");
     }
     out.push_str("┘\n");
+    // Draw the horizontal labels
+    for c in 0..width {
+        out.push_str(if c == 0 { "  " } else { "   " });
+        out.push(horizontal_label[c]);
+    }
     out
 }
 
 fn main() {
-    println!("Hello, world!");
+    let vertical_label = ['9', '8', '7', '6', '5', '4', '3', '2', '1'];
+    let horizontal_label = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'];
     std::io::stdout()
         .lock()
         .write_all(
-            draw_unicode_box(9, 9, |r, c| {
+            draw_unicode_box(&horizontal_label, &vertical_label, |r, c| {
                 if r == 0 && c == 0 {
                     Some(FenceOrientation::Horizontal)
                 } else if r == 7 && c == 7 {
