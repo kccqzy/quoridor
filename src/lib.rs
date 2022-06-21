@@ -286,6 +286,7 @@ impl FenceState {
     fn new() -> FenceState {
         FenceState { fences: [0; 2], fences_remaining: [10; 2] }
     }
+
     fn get(&self, [r, c]: [u8; 2]) -> Option<FenceOrientation> {
         assert!(r < BOARD_HEIGHT - 1 && c < BOARD_WIDTH - 1, "location out of bounds {},{}", r, c);
         let index = r * (BOARD_WIDTH - 1) + c;
@@ -297,12 +298,143 @@ impl FenceState {
             None
         }
     }
+
     fn remaining(&self, player: Player) -> u8 {
         self.fences_remaining[player as usize]
     }
+
     fn has(&self, loc @ [fr, fc]: [u8; 2], o: FenceOrientation) -> bool {
         fr < BOARD_HEIGHT - 1 && fc < BOARD_WIDTH - 1 && self.get(loc) == Some(o)
     }
+
+    fn is_move_fence_free(
+        &self, old_loc @ [r, c]: [u8; 2], direction: Direction,
+    ) -> Option<[u8; 2]> {
+        let [dr, dc] = match direction {
+            Direction::North => [255, 0],
+            Direction::South => [1, 0],
+            Direction::West => [0, 255],
+            Direction::East => [0, 1],
+        };
+        let new_loc = [r.wrapping_add(dr), c.wrapping_add(dc)];
+
+        // The border of the grid is an implicit fence.
+        if !GameState::is_within_bound(new_loc) {
+            return None;
+        }
+
+        let blocking_fence_orientation = match direction {
+            Direction::North | Direction::South => FenceOrientation::Horizontal,
+            Direction::East | Direction::West => FenceOrientation::Vertical,
+        };
+        // Along the longitudinal axis of the fence, the move is
+        // blocked if the top-left corner of the fence is the same
+        // as the old location, or just one less than the old
+        // location.
+        //
+        // Along the transverse axis of the fence, the move is
+        // blocked if the top-left corner of the fence is the same
+        // as the minimum of old and new location.
+        let mut blocking_fences: [[u8; 2]; 2] = [[0; 2]; 2];
+        let fo = blocking_fence_orientation;
+        blocking_fences[0][fo as usize] = old_loc[fo as usize];
+        blocking_fences[0][1 - fo as usize] =
+            std::cmp::min(old_loc[1 - fo as usize], new_loc[1 - fo as usize]);
+        blocking_fences[1][fo as usize] = old_loc[fo as usize].wrapping_add(255);
+        blocking_fences[1][1 - fo as usize] = blocking_fences[0][1 - fo as usize];
+        let is_fence_free = !blocking_fences.into_iter().any(|floc| self.has(floc, fo));
+
+        if is_fence_free {
+            Some(new_loc)
+        } else {
+            None
+        }
+    }
+
+    fn valid_moves_from(&self, loc: [u8; 2], other_player_loc: Option<[u8; 2]>) -> Vec<[u8; 2]> {
+        // The move rules are the follows: generally the pawn can move
+        // one space in any cardinal direction, except when blocked by a
+        // fence. The pawn can jump over the other player. If there is a
+        // fence behind the other player, the pawn can jump diagonally,
+        // if there is no fence between the other player and the
+        // location of the jump.
+        let mut rv = vec![];
+
+        for dir in Direction::iterator() {
+            if let Some(new_loc) = self.is_move_fence_free(loc, dir) {
+                let occupied_by_other_player = other_player_loc.map_or(false, |l| l == new_loc);
+                if !occupied_by_other_player {
+                    rv.push(new_loc);
+                } else {
+                    // The other player is occupying the space. Try jumping forward.
+                    if let Some(final_loc) = self.is_move_fence_free(new_loc, dir) {
+                        rv.push(final_loc);
+                    } else {
+                        // We can jump in the perpendicular direction.
+                        for pdir in dir.perpendicular_iterator() {
+                            if let Some(final_loc) = self.is_move_fence_free(new_loc, pdir) {
+                                rv.push(final_loc);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        rv
+    }
+
+    fn shortest_distance<T: Copy + Ord + std::fmt::Debug>(
+        &self, from_r: T, from_c: u8, goal_r: T, t_to_u8: fn(T) -> u8, u8_to_t: fn(u8) -> T,
+    ) -> Option<u8> {
+        #[derive(Debug)]
+        struct HeapItem<T> {
+            r: T,
+            c: u8,
+            distance_from_start: u8,
+        }
+        impl<T: PartialEq> PartialEq for HeapItem<T> {
+            fn eq(&self, other: &Self) -> bool {
+                self.r.eq(&other.r)
+            }
+        }
+        impl<T: Eq> Eq for HeapItem<T> {}
+        impl<T: PartialOrd> PartialOrd for HeapItem<T> {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                self.r.partial_cmp(&other.r)
+            }
+        }
+        impl<T: Ord> Ord for HeapItem<T> {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                self.r.cmp(&other.r)
+            }
+        }
+        let mut visited = [[false; BOARD_WIDTH as usize]; BOARD_HEIGHT as usize];
+        let mut queue = std::collections::BinaryHeap::from([HeapItem {
+            r: from_r,
+            c: from_c,
+            distance_from_start: 0,
+        }]);
+        visited[t_to_u8(from_r) as usize][from_c as usize] = true;
+        while let Some(item) = queue.pop() {
+            if item.r == goal_r {
+                return Some(item.distance_from_start);
+            }
+            for new_loc in self.valid_moves_from([t_to_u8(item.r), item.c], None).into_iter() {
+                let new_item = HeapItem::<T> {
+                    r: u8_to_t(new_loc[0]),
+                    c: new_loc[1],
+                    distance_from_start: item.distance_from_start + 1,
+                };
+                let visited = &mut visited[t_to_u8(new_item.r) as usize][new_item.c as usize];
+                if !*visited {
+                    *visited = true;
+                    queue.push(new_item);
+                }
+            }
+        }
+        None
+    }
+
     fn try_place_fence(
         this: &mut Rc<Self>, player: Player, (loc @ [r, c], o): ([u8; 2], FenceOrientation),
     ) -> std::result::Result<(), &'static str> {
@@ -369,137 +501,30 @@ impl GameState {
         self.location[0][0] == 0 || self.location[1][0] == BOARD_HEIGHT - 1
     }
 
-    fn is_move_fence_free(
-        &self, old_loc @ [r, c]: [u8; 2], direction: Direction,
-    ) -> Option<[u8; 2]> {
-        let [dr, dc] = match direction {
-            Direction::North => [255, 0],
-            Direction::South => [1, 0],
-            Direction::West => [0, 255],
-            Direction::East => [0, 1],
-        };
-        let new_loc = [r.wrapping_add(dr), c.wrapping_add(dc)];
-        if !Self::is_within_bound(new_loc) {
-            return None;
-        }
-
-        let blocking_fence_orientation = match direction {
-            Direction::North | Direction::South => FenceOrientation::Horizontal,
-            Direction::East | Direction::West => FenceOrientation::Vertical,
-        };
-        // Along the longitudinal axis of the fence, the move is
-        // blocked if the top-left corner of the fence is the same
-        // as the old location, or just one less than the old
-        // location.
-        //
-        // Along the transverse axis of the fence, the move is
-        // blocked if the top-left corner of the fence is the same
-        // as the minimum of old and new location.
-        let mut blocking_fences: [[u8; 2]; 2] = [[0; 2]; 2];
-        let fo = blocking_fence_orientation;
-        blocking_fences[0][fo as usize] = old_loc[fo as usize];
-        blocking_fences[0][1 - fo as usize] =
-            std::cmp::min(old_loc[1 - fo as usize], new_loc[1 - fo as usize]);
-        blocking_fences[1][fo as usize] = old_loc[fo as usize].wrapping_add(255);
-        blocking_fences[1][1 - fo as usize] = blocking_fences[0][1 - fo as usize];
-        let is_fence_free = !blocking_fences.into_iter().any(|floc| self.fence_state.has(floc, fo));
-
-        if is_fence_free {
-            Some(new_loc)
-        } else {
-            None
-        }
-    }
-
-    fn valid_moves_from(&self, loc: [u8; 2], other_player_loc: Option<[u8; 2]>) -> Vec<[u8; 2]> {
-        // The move rules are the follows: generally the pawn can move
-        // one space in any cardinal direction, except when blocked by a
-        // fence. The pawn can jump over the other player. If there is a
-        // fence behind the other player, the pawn can jump diagonally,
-        // if there is no fence between the other player and the
-        // location of the jump.
-        let mut rv = vec![];
-
-        for dir in Direction::iterator() {
-            if let Some(new_loc) = self.is_move_fence_free(loc, dir) {
-                let occupied_by_other_player = other_player_loc.map_or(false, |l| l == new_loc);
-                if !occupied_by_other_player {
-                    rv.push(new_loc);
-                } else {
-                    // The other player is occupying the space. Try jumping forward.
-                    if let Some(final_loc) = self.is_move_fence_free(new_loc, dir) {
-                        rv.push(final_loc);
-                    } else {
-                        // We can jump in the perpendicular direction.
-                        for pdir in dir.perpendicular_iterator() {
-                            if let Some(final_loc) = self.is_move_fence_free(new_loc, pdir) {
-                                rv.push(final_loc);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        rv
-    }
-
     pub fn valid_moves(&self, player: Player) -> Vec<[u8; 2]> {
         let loc = self.location[player as usize];
         let other_loc = Some(self.location[1 - player as usize]);
-        self.valid_moves_from(loc, other_loc)
+        self.fence_state.valid_moves_from(loc, other_loc)
     }
 
-    fn is_reachable<T: Copy + Ord + std::fmt::Debug>(
-        &self, from_r: T, from_c: u8, goal_r: T, t_to_u8: fn(T) -> u8, u8_to_t: fn(u8) -> T,
-    ) -> Option<u8> {
-        #[derive(Debug)]
-        struct HeapItem<T> {
-            r: T,
-            c: u8,
-            distance_from_start: u8,
-        }
-        impl<T: PartialEq> PartialEq for HeapItem<T> {
-            fn eq(&self, other: &Self) -> bool {
-                self.r.eq(&other.r)
-            }
-        }
-        impl<T: Eq> Eq for HeapItem<T> {}
-        impl<T: PartialOrd> PartialOrd for HeapItem<T> {
-            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-                self.r.partial_cmp(&other.r)
-            }
-        }
-        impl<T: Ord> Ord for HeapItem<T> {
-            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-                self.r.cmp(&other.r)
-            }
-        }
-        let mut visited = [[false; BOARD_WIDTH as usize]; BOARD_HEIGHT as usize];
-        let mut queue = std::collections::BinaryHeap::from([HeapItem {
-            r: from_r,
-            c: from_c,
-            distance_from_start: 0,
-        }]);
-        visited[t_to_u8(from_r) as usize][from_c as usize] = true;
-        while let Some(item) = queue.pop() {
-            if item.r == goal_r {
-                return Some(item.distance_from_start);
-            }
-            for new_loc in self.valid_moves_from([t_to_u8(item.r), item.c], None).into_iter() {
-                let new_item = HeapItem::<T> {
-                    r: u8_to_t(new_loc[0]),
-                    c: new_loc[1],
-                    distance_from_start: item.distance_from_start + 1,
-                };
-                let visited = &mut visited[t_to_u8(new_item.r) as usize][new_item.c as usize];
-                if !*visited {
-                    *visited = true;
-                    queue.push(new_item);
-                }
-            }
-        }
-        None
+    fn first_player_shortest_distance_to_goal(&self) -> Option<u8> {
+        self.fence_state.shortest_distance(
+            std::cmp::Reverse(self.location[0][0]),
+            self.location[0][1],
+            std::cmp::Reverse(0),
+            |r| r.0,
+            |r| std::cmp::Reverse(r),
+        )
+    }
+
+    fn second_player_shortest_distance_to_goal(&self) -> Option<u8> {
+        self.fence_state.shortest_distance(
+            self.location[1][0],
+            self.location[1][1],
+            BOARD_HEIGHT - 1,
+            |r| r,
+            |r| r,
+        )
     }
 
     pub fn perform_action(
@@ -521,27 +546,9 @@ impl GameState {
             Action::Fence(new_fence) => {
                 let mut new_state = self.clone();
                 FenceState::try_place_fence(&mut new_state.fence_state, player, new_fence)?;
-                if new_state
-                    .is_reachable(
-                        self.location[1][0],
-                        self.location[1][1],
-                        BOARD_HEIGHT - 1,
-                        |r| r,
-                        |r| r,
-                    )
-                    .is_none()
-                {
+                if new_state.second_player_shortest_distance_to_goal().is_none() {
                     Err("the fence causes the second player to be unable to reach the goal")
-                } else if new_state
-                    .is_reachable(
-                        std::cmp::Reverse(self.location[0][0]),
-                        self.location[0][1],
-                        std::cmp::Reverse(0),
-                        |r| r.0,
-                        |r| std::cmp::Reverse(r),
-                    )
-                    .is_none()
-                {
+                } else if new_state.first_player_shortest_distance_to_goal().is_none() {
                     Err("the fence causes the first player to be unable to reach the goal")
                 } else {
                     Ok(new_state)
