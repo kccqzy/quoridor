@@ -35,7 +35,27 @@ fn main() {
 
         let mut input = String::new();
         std::io::stdin().read_line(&mut input).unwrap();
-        match gs.last().unwrap().parse_move_for_player(current_player, input.trim()) {
+        if !input.is_ascii() {
+            current_message = "not an ASCII string".into();
+            continue;
+        }
+        input.make_ascii_lowercase();
+        let input = input.trim();
+        // Check for meta commands.
+        if input == "quit" {
+            break;
+        }
+        if input == "undo" {
+            if gs.len() > 1 {
+                current_message = "Undo!".into();
+                current_player = current_player.other();
+                gs.pop();
+            } else {
+                current_message = "Cannot undo beyond the first".into();
+            }
+            continue;
+        }
+        match gs.last().unwrap().parse_move_for_player(current_player, input) {
             Err(msg) => {
                 current_message = format!("I don't recognize that: {}", msg);
             }
@@ -46,8 +66,7 @@ fn main() {
                         current_message = format!("That move was not valid: {}", msg);
                     }
                     Ok(new_gs) => {
-                        current_message =
-                            format!("Last action by {}: {}", current_player, input.trim());
+                        current_message = format!("Last action by {}: {}", current_player, input);
                         current_player = current_player.other();
                         gs.push(new_gs);
                     }

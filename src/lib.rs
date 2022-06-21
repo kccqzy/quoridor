@@ -564,10 +564,6 @@ impl GameState {
     pub fn parse_move_for_player(
         &self, player: Player, cmd: &str,
     ) -> std::result::Result<Action, String> {
-        if !cmd.is_ascii() {
-            return Err("not an ASCII string".into());
-        }
-        let cmd = cmd.to_ascii_lowercase();
         let mut loc = self.location[player as usize];
 
         let cmd_str: &[u8] = cmd.as_bytes();
