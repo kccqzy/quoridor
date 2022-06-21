@@ -3,6 +3,14 @@ use std::rc::Rc;
 const BOARD_WIDTH: u8 = 9;
 const BOARD_HEIGHT: u8 = 9;
 
+const VERTICAL_LABEL: [char; BOARD_HEIGHT as usize] = ['9', '8', '7', '6', '5', '4', '3', '2', '1'];
+const HORIZONTAL_LABEL: [char; BOARD_WIDTH as usize] =
+    ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'];
+const PLAYER_1_SYMBOL: char = '■';
+const PLAYER_2_SYMBOL: char = '●';
+const PLAYER_1_NEXT_SYMBOL: char = '□';
+const PLAYER_2_NEXT_SYMBOL: char = '○';
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum FenceOrientation {
     Vertical = 0,
@@ -170,10 +178,60 @@ pub enum Player {
     Player2 = 1,
 }
 
+impl Player {
+    pub fn other(&self) -> Self {
+        match *self {
+            Player::Player1 => Player::Player2,
+            Player::Player2 => Player::Player1,
+        }
+    }
+}
+
+impl std::fmt::Display for Player {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!("Player {} ({})", *self as usize, match *self {
+            Player::Player1 => PLAYER_1_SYMBOL,
+            Player::Player2 => PLAYER_2_SYMBOL,
+        }))
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum Action {
     Move([u8; 2]),
     Fence(([u8; 2], FenceOrientation)),
+}
+
+impl TryFrom<&[u8]> for Action {
+    type Error = &'static str;
+    fn try_from(value: &[u8]) -> std::result::Result<Self, Self::Error> {
+        if value.len() < 2 || value.len() > 3 {
+            return Err("length must be at least 2 and at most 3");
+        }
+        let first = value[0];
+        let c = if first >= b'a' && first <= b'i' {
+            first - b'a'
+        } else {
+            return Err("first character must be from 'a' to 'i'");
+        };
+        let second = value[1];
+        let r = if second >= b'1' && second <= b'9' {
+            BOARD_HEIGHT - (second - b'1') - 1
+        } else {
+            return Err("second character must be a digit from '1' to '9'");
+        };
+        if value.len() == 3 {
+            if value[2] == b'h' {
+                Ok(Action::Fence(([r, c], FenceOrientation::Horizontal)))
+            } else if value[2] == b'v' {
+                Ok(Action::Fence(([r, c], FenceOrientation::Vertical)))
+            } else {
+                Err("third character must be 'h' or 'v'")
+            }
+        } else {
+            Ok(Action::Move([r, c]))
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -194,6 +252,24 @@ impl Direction {
         match self {
             North | South => [East, West].iter().copied(),
             East | West => [North, South].iter().copied(),
+        }
+    }
+}
+
+impl TryFrom<&[u8]> for Direction {
+    type Error = &'static str;
+    fn try_from(value: &[u8]) -> std::result::Result<Self, Self::Error> {
+        use self::Direction::*;
+        if value == b"north" || value == b"n" {
+            Ok(North)
+        } else if value == b"south" || value == b"s" {
+            Ok(South)
+        } else if value == b"east" || value == b"e" {
+            Ok(East)
+        } else if value == b"west" || value == b"w" {
+            Ok(West)
+        } else {
+            Err("unrecognized cardinal direction")
         }
     }
 }
@@ -265,30 +341,22 @@ impl GameState {
     }
 
     pub fn draw(&self, show_next_moves: bool) -> String {
-        let vertical_label: [char; BOARD_HEIGHT as usize] =
-            ['9', '8', '7', '6', '5', '4', '3', '2', '1'];
-        let horizontal_label: [char; BOARD_WIDTH as usize] =
-            ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'];
-        let player_1_symbol = '■';
-        let player_2_symbol = '●';
-        let player_1_next_symbol = '□';
-        let player_2_next_symbol = '○';
         let player_1_next =
             if show_next_moves { self.valid_moves(Player::Player1) } else { vec![] };
         let player_2_next =
             if show_next_moves { self.valid_moves(Player::Player2) } else { vec![] };
         draw_unicode_box(
-            &horizontal_label,
-            &vertical_label,
+            &HORIZONTAL_LABEL,
+            &VERTICAL_LABEL,
             |r, c| {
                 if [r, c] == self.location[0] {
-                    player_1_symbol
+                    PLAYER_1_SYMBOL
                 } else if [r, c] == self.location[1] {
-                    player_2_symbol
+                    PLAYER_2_SYMBOL
                 } else if player_1_next.iter().any(|&l| l == [r, c]) {
-                    player_1_next_symbol
+                    PLAYER_1_NEXT_SYMBOL
                 } else if player_2_next.iter().any(|&l| l == [r, c]) {
-                    player_2_next_symbol
+                    PLAYER_2_NEXT_SYMBOL
                 } else {
                     ' '
                 }
@@ -311,6 +379,9 @@ impl GameState {
             Direction::East => [0, 1],
         };
         let new_loc = [r.wrapping_add(dr), c.wrapping_add(dc)];
+        if !Self::is_within_bound(new_loc) {
+            return None;
+        }
 
         let blocking_fence_orientation = match direction {
             Direction::North | Direction::South => FenceOrientation::Horizontal,
@@ -476,6 +547,41 @@ impl GameState {
                     Ok(new_state)
                 }
             }
+        }
+    }
+
+    pub fn is_within_bound(loc: [u8; 2]) -> bool {
+        loc[0] < BOARD_HEIGHT && loc[1] < BOARD_WIDTH
+    }
+
+    pub fn parse_move_for_player(
+        &self, player: Player, cmd: &str,
+    ) -> std::result::Result<Action, String> {
+        if !cmd.is_ascii() {
+            return Err("not an ASCII string".into());
+        }
+        let cmd = cmd.to_ascii_lowercase();
+        let mut loc = self.location[player as usize];
+
+        let cmd_str: &[u8] = cmd.as_bytes();
+        if let Ok(dir) = Direction::try_from(cmd_str) {
+            // Cardinal directions
+            let [dr, dc] = match dir {
+                Direction::North => [255, 0],
+                Direction::South => [1, 0],
+                Direction::West => [0, 255],
+                Direction::East => [0, 1],
+            };
+            loc[0] = loc[0].wrapping_add(dr);
+            loc[1] = loc[1].wrapping_add(dc);
+            if Self::is_within_bound(loc) {
+                Ok(Action::Move(loc))
+            } else {
+                Err(format!("cannot go in direction {:?}", dir))
+            }
+        } else {
+            // Algebraic notation
+            Action::try_from(cmd_str).map_err(|e| e.into())
         }
     }
 }
