@@ -340,19 +340,19 @@ impl GameState {
         }
     }
 
-    pub fn valid_moves(&self, player: Player) -> Vec<[u8; 2]> {
+    fn valid_moves_from(&self, loc: [u8; 2], other_player_loc: Option<[u8; 2]>) -> Vec<[u8; 2]> {
         // The move rules are the follows: generally the pawn can move
         // one space in any cardinal direction, except when blocked by a
         // fence. The pawn can jump over the other player. If there is a
         // fence behind the other player, the pawn can jump diagonally,
         // if there is no fence between the other player and the
         // location of the jump.
-        let loc = self.location[player as usize];
         let mut rv = vec![];
 
         for dir in Direction::iterator() {
             if let Some(new_loc) = self.is_move_fence_free(loc, dir) {
-                if self.location[1 - player as usize] != new_loc {
+                let occupied_by_other_player = other_player_loc.map_or(false, |l| l == new_loc);
+                if !occupied_by_other_player {
                     rv.push(new_loc);
                 } else {
                     // The other player is occupying the space. Try jumping forward.
@@ -371,6 +371,64 @@ impl GameState {
         }
 
         rv
+    }
+
+    pub fn valid_moves(&self, player: Player) -> Vec<[u8; 2]> {
+        let loc = self.location[player as usize];
+        let other_loc = Some(self.location[1 - player as usize]);
+        self.valid_moves_from(loc, other_loc)
+    }
+
+    fn is_reachable<T: Copy + Ord + std::fmt::Debug>(
+        &self, from_r: T, from_c: u8, goal_r: T, t_to_u8: fn(T) -> u8, u8_to_t: fn(u8) -> T,
+    ) -> Option<u8> {
+        #[derive(Debug)]
+        struct HeapItem<T> {
+            r: T,
+            c: u8,
+            distance_from_start: u8,
+        }
+        impl<T: PartialEq> PartialEq for HeapItem<T> {
+            fn eq(&self, other: &Self) -> bool {
+                self.r.eq(&other.r)
+            }
+        }
+        impl<T: Eq> Eq for HeapItem<T> {}
+        impl<T: PartialOrd> PartialOrd for HeapItem<T> {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                self.r.partial_cmp(&other.r)
+            }
+        }
+        impl<T: Ord> Ord for HeapItem<T> {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                self.r.cmp(&other.r)
+            }
+        }
+        let mut visited = [[false; BOARD_WIDTH as usize]; BOARD_HEIGHT as usize];
+        let mut queue = std::collections::BinaryHeap::from([HeapItem {
+            r: from_r,
+            c: from_c,
+            distance_from_start: 0,
+        }]);
+        visited[t_to_u8(from_r) as usize][from_c as usize] = true;
+        while let Some(item) = queue.pop() {
+            if item.r == goal_r {
+                return Some(item.distance_from_start);
+            }
+            for new_loc in self.valid_moves_from([t_to_u8(item.r), item.c], None).into_iter() {
+                let new_item = HeapItem::<T> {
+                    r: u8_to_t(new_loc[0]),
+                    c: new_loc[1],
+                    distance_from_start: item.distance_from_start + 1,
+                };
+                let visited = &mut visited[t_to_u8(new_item.r) as usize][new_item.c as usize];
+                if !*visited {
+                    *visited = true;
+                    queue.push(new_item);
+                }
+            }
+        }
+        None
     }
 
     pub fn perform_action(
@@ -392,9 +450,31 @@ impl GameState {
             Action::Fence(new_fence) => {
                 let mut new_state = self.clone();
                 FenceState::try_place_fence(&mut new_state.fence_state, player, new_fence)?;
-                // TODO: reachability check
-
-                Ok(new_state)
+                if new_state
+                    .is_reachable(
+                        self.location[1][0],
+                        self.location[1][1],
+                        BOARD_HEIGHT - 1,
+                        |r| r,
+                        |r| r,
+                    )
+                    .is_none()
+                {
+                    Err("the fence causes the second player to be unable to reach the goal")
+                } else if new_state
+                    .is_reachable(
+                        std::cmp::Reverse(self.location[0][0]),
+                        self.location[0][1],
+                        std::cmp::Reverse(0),
+                        |r| r.0,
+                        |r| std::cmp::Reverse(r),
+                    )
+                    .is_none()
+                {
+                    Err("the fence causes the first player to be unable to reach the goal")
+                } else {
+                    Ok(new_state)
+                }
             }
         }
     }
