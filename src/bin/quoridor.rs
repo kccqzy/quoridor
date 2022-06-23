@@ -55,6 +55,10 @@ fn main() {
             }
             continue;
         }
+        if input == "info" {
+            current_message = gs.last().unwrap().produce_info();
+            continue;
+        }
         match gs.last().unwrap().parse_move_for_player(current_player, input) {
             Err(msg) => {
                 current_message = format!("I don't recognize that: {}", msg);

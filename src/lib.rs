@@ -383,51 +383,67 @@ impl FenceState {
         rv
     }
 
-    fn shortest_distance<T: Copy + Ord + std::fmt::Debug>(
-        &self, from_r: T, from_c: u8, goal_r: T, t_to_u8: fn(T) -> u8, u8_to_t: fn(u8) -> T,
-    ) -> Option<u8> {
-        #[derive(Debug)]
-        struct HeapItem<T> {
-            r: T,
-            c: u8,
-            distance_from_start: u8,
+    fn shortest_distance(&self, from: [u8; 2], goal_r: u8) -> Option<Vec<[u8; 2]>> {
+        struct HeapItem {
+            cur: [u8; 2],
+            prev: [u8; 2],
+            dist_from_start: u8,
+            est_dist_to_finish: u8,
         }
-        impl<T: PartialEq> PartialEq for HeapItem<T> {
+        impl PartialEq for HeapItem {
             fn eq(&self, other: &Self) -> bool {
-                self.r.eq(&other.r)
+                self.dist_from_start + self.est_dist_to_finish
+                    == other.dist_from_start + other.est_dist_to_finish
             }
         }
-        impl<T: Eq> Eq for HeapItem<T> {}
-        impl<T: PartialOrd> PartialOrd for HeapItem<T> {
+        impl Eq for HeapItem {}
+        impl PartialOrd for HeapItem {
             fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-                self.r.partial_cmp(&other.r)
+                (other.dist_from_start + other.est_dist_to_finish)
+                    .partial_cmp(&(self.dist_from_start + self.est_dist_to_finish))
             }
         }
-        impl<T: Ord> Ord for HeapItem<T> {
+        impl Ord for HeapItem {
             fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-                self.r.cmp(&other.r)
+                (other.dist_from_start + other.est_dist_to_finish)
+                    .cmp(&(self.dist_from_start + self.est_dist_to_finish))
             }
         }
+
+        let mut steps = vec![];
         let mut visited = [[false; BOARD_WIDTH as usize]; BOARD_HEIGHT as usize];
         let mut queue = std::collections::BinaryHeap::from([HeapItem {
-            r: from_r,
-            c: from_c,
-            distance_from_start: 0,
+            cur: from,
+            prev: from,
+            dist_from_start: 0,
+            est_dist_to_finish: from[0].abs_diff(goal_r),
         }]);
-        visited[t_to_u8(from_r) as usize][from_c as usize] = true;
+        visited[from[0] as usize][from[1] as usize] = true;
         while let Some(item) = queue.pop() {
-            if item.r == goal_r {
-                return Some(item.distance_from_start);
+            if item.est_dist_to_finish == 0 {
+                // Found. We just need to reconstruct the path.
+                let mut path = vec![item.cur, item.prev];
+                let mut cur = item.prev;
+                for (prev, next) in steps.into_iter().skip(1).rev() {
+                    if cur == next {
+                        path.push(prev);
+                        cur = prev;
+                    }
+                }
+                assert_eq!(*path.last().unwrap(), from);
+                return Some(path);
             }
-            for new_loc in self.valid_moves_from([t_to_u8(item.r), item.c], None).into_iter() {
-                let new_item = HeapItem::<T> {
-                    r: u8_to_t(new_loc[0]),
-                    c: new_loc[1],
-                    distance_from_start: item.distance_from_start + 1,
-                };
-                let visited = &mut visited[t_to_u8(new_item.r) as usize][new_item.c as usize];
+            steps.push((item.prev, item.cur));
+            for new_loc in self.valid_moves_from(item.cur, None).into_iter() {
+                let visited = &mut visited[new_loc[0] as usize][new_loc[1] as usize];
                 if !*visited {
                     *visited = true;
+                    let new_item = HeapItem {
+                        cur: new_loc,
+                        prev: item.cur,
+                        dist_from_start: item.dist_from_start + 1,
+                        est_dist_to_finish: new_loc[0].abs_diff(goal_r),
+                    };
                     queue.push(new_item);
                 }
             }
@@ -507,24 +523,12 @@ impl GameState {
         self.fence_state.valid_moves_from(loc, other_loc)
     }
 
-    fn first_player_shortest_distance_to_goal(&self) -> Option<u8> {
-        self.fence_state.shortest_distance(
-            std::cmp::Reverse(self.location[0][0]),
-            self.location[0][1],
-            std::cmp::Reverse(0),
-            |r| r.0,
-            |r| std::cmp::Reverse(r),
-        )
+    fn first_player_shortest_distance_to_goal(&self) -> Option<Vec<[u8; 2]>> {
+        self.fence_state.shortest_distance(self.location[0], 0)
     }
 
-    fn second_player_shortest_distance_to_goal(&self) -> Option<u8> {
-        self.fence_state.shortest_distance(
-            self.location[1][0],
-            self.location[1][1],
-            BOARD_HEIGHT - 1,
-            |r| r,
-            |r| r,
-        )
+    fn second_player_shortest_distance_to_goal(&self) -> Option<Vec<[u8; 2]>> {
+        self.fence_state.shortest_distance(self.location[1], BOARD_HEIGHT - 1)
     }
 
     pub fn perform_action(
@@ -586,5 +590,27 @@ impl GameState {
             // Algebraic notation
             Action::try_from(cmd_str).map_err(|e| e.into())
         }
+    }
+
+    pub fn produce_info(&self) -> String {
+        let mut rv = String::new();
+        fn to_notation([r, c]: [u8; 2], out: &mut String) {
+            out.push(char::from(b'a' + c));
+            out.push(char::from(b'1' + (BOARD_HEIGHT - 1 - r)));
+        }
+
+        rv.push_str("First player shortest path:");
+        for path in self.first_player_shortest_distance_to_goal().unwrap().into_iter().rev() {
+            rv.push(' ');
+            to_notation(path, &mut rv);
+        }
+        rv.push('\n');
+
+        rv.push_str("Second player shortest path:");
+        for path in self.second_player_shortest_distance_to_goal().unwrap().into_iter().rev() {
+            rv.push(' ');
+            to_notation(path, &mut rv);
+        }
+        rv
     }
 }
