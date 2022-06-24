@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use std::rc::Rc;
 
 const BOARD_WIDTH: u8 = 9;
@@ -189,7 +190,7 @@ impl Player {
 
 impl std::fmt::Display for Player {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!("Player {} ({})", *self as usize, match *self {
+        f.write_fmt(format_args!("Player {} ({})", 1 + *self as usize, match *self {
             Player::Player1 => PLAYER_1_SYMBOL,
             Player::Player2 => PLAYER_2_SYMBOL,
         }))
@@ -234,6 +235,31 @@ impl TryFrom<&[u8]> for Action {
     }
 }
 
+impl std::str::FromStr for Action {
+    type Err = &'static str;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        s.as_bytes().try_into()
+    }
+}
+
+impl std::fmt::Display for Action {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Action::Move([r, c]) => {
+                let out = [b'a' + c, b'1' + (BOARD_HEIGHT - 1 - r)];
+                f.write_str(std::str::from_utf8(&out).unwrap())
+            }
+            Action::Fence(([r, c], o)) => {
+                let out = [b'a' + c, b'1' + (BOARD_HEIGHT - 1 - r), match o {
+                    FenceOrientation::Horizontal => b'h',
+                    FenceOrientation::Vertical => b'v',
+                }];
+                f.write_str(std::str::from_utf8(&out).unwrap())
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum Direction {
     North,
@@ -271,6 +297,13 @@ impl TryFrom<&[u8]> for Direction {
         } else {
             Err("unrecognized cardinal direction")
         }
+    }
+}
+
+impl std::str::FromStr for Direction {
+    type Err = &'static str;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        s.as_bytes().try_into()
     }
 }
 
@@ -594,22 +627,16 @@ impl GameState {
 
     pub fn produce_info(&self) -> String {
         let mut rv = String::new();
-        fn to_notation([r, c]: [u8; 2], out: &mut String) {
-            out.push(char::from(b'a' + c));
-            out.push(char::from(b'1' + (BOARD_HEIGHT - 1 - r)));
-        }
 
         rv.push_str("First player shortest path:");
         for path in self.first_player_shortest_distance_to_goal().unwrap().into_iter().rev() {
-            rv.push(' ');
-            to_notation(path, &mut rv);
+            write!(rv, " {}", Action::Move(path)).unwrap();
         }
         rv.push('\n');
 
         rv.push_str("Second player shortest path:");
         for path in self.second_player_shortest_distance_to_goal().unwrap().into_iter().rev() {
-            rv.push(' ');
-            to_notation(path, &mut rv);
+            write!(rv, " {}", Action::Move(path)).unwrap();
         }
         rv
     }
