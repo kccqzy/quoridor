@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use std::fmt::Write;
 use std::rc::Rc;
 
@@ -188,7 +189,7 @@ impl Player {
     }
 }
 
-impl std::fmt::Display for Player {
+impl Display for Player {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_fmt(format_args!("Player {} ({})", 1 + *self as usize, match *self {
             Player::Player1 => PLAYER_1_SYMBOL,
@@ -242,7 +243,7 @@ impl std::str::FromStr for Action {
     }
 }
 
-impl std::fmt::Display for Action {
+impl Display for Action {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
             Action::Move([r, c]) => {
@@ -307,6 +308,18 @@ impl std::str::FromStr for Direction {
     }
 }
 
+/// A path of coordinates from destination to source.
+struct Path(Vec<[u8; 2]>);
+
+impl Display for Path {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for &loc in self.0.iter().rev() {
+            write!(f, " {}", Action::Move(loc))?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 struct FenceState {
     /// The fences placed as a bit set.
@@ -340,6 +353,9 @@ impl FenceState {
         fr < BOARD_HEIGHT - 1 && fc < BOARD_WIDTH - 1 && self.get(loc) == Some(o)
     }
 
+    /// Whether or not the move from a particular old location in a direction is
+    /// obstructed by a fence. If it is, return None. Otherwise return the new
+    /// location.
     fn is_move_fence_free(
         &self, old_loc @ [r, c]: [u8; 2], direction: Direction,
     ) -> Option<[u8; 2]> {
@@ -356,10 +372,34 @@ impl FenceState {
             return None;
         }
 
-        let blocking_fence_orientation = match direction {
-            Direction::North | Direction::South => FenceOrientation::Horizontal,
-            Direction::East | Direction::West => FenceOrientation::Vertical,
+        let (fo, blocking_fences) = Self::blocking_fences(old_loc, new_loc);
+        let is_fence_free = !blocking_fences.into_iter().any(|floc| self.has(floc, fo));
+
+        if is_fence_free {
+            Some(new_loc)
+        } else {
+            None
+        }
+    }
+
+    /// Find all the potentially blocking fences between two adjacent locations.
+    /// This does not check whether those fences exist, can be placed, or indeed
+    /// even valid.
+    fn blocking_fences(old_loc: [u8; 2], new_loc: [u8; 2]) -> (FenceOrientation, [[u8; 2]; 2]) {
+        if old_loc[0] == new_loc[0] {
+            debug_assert_eq!(old_loc[1].abs_diff(new_loc[1]), 1);
+        } else if old_loc[1] == new_loc[1] {
+            debug_assert_eq!(old_loc[0].abs_diff(new_loc[0]), 1);
+        } else {
+            debug_assert!(false, "locations must be in the same row or column");
+        }
+
+        let fo = if old_loc[0] == new_loc[0] {
+            FenceOrientation::Vertical
+        } else {
+            FenceOrientation::Horizontal
         };
+
         // Along the longitudinal axis of the fence, the move is
         // blocked if the top-left corner of the fence is the same
         // as the old location, or just one less than the old
@@ -369,19 +409,12 @@ impl FenceState {
         // blocked if the top-left corner of the fence is the same
         // as the minimum of old and new location.
         let mut blocking_fences: [[u8; 2]; 2] = [[0; 2]; 2];
-        let fo = blocking_fence_orientation;
         blocking_fences[0][fo as usize] = old_loc[fo as usize];
         blocking_fences[0][1 - fo as usize] =
             std::cmp::min(old_loc[1 - fo as usize], new_loc[1 - fo as usize]);
         blocking_fences[1][fo as usize] = old_loc[fo as usize].wrapping_add(255);
         blocking_fences[1][1 - fo as usize] = blocking_fences[0][1 - fo as usize];
-        let is_fence_free = !blocking_fences.into_iter().any(|floc| self.has(floc, fo));
-
-        if is_fence_free {
-            Some(new_loc)
-        } else {
-            None
-        }
+        (fo, blocking_fences)
     }
 
     fn valid_moves_from(&self, loc: [u8; 2], other_player_loc: Option<[u8; 2]>) -> Vec<[u8; 2]> {
@@ -416,7 +449,7 @@ impl FenceState {
         rv
     }
 
-    fn shortest_distance(&self, from: [u8; 2], goal_r: u8) -> Option<Vec<[u8; 2]>> {
+    fn shortest_distance(&self, from: [u8; 2], goal_r: u8) -> Option<Path> {
         struct HeapItem {
             cur: [u8; 2],
             prev: [u8; 2],
@@ -464,7 +497,7 @@ impl FenceState {
                     }
                 }
                 assert_eq!(*path.last().unwrap(), from);
-                return Some(path);
+                return Some(Path(path));
             }
             steps.push((item.prev, item.cur));
             for new_loc in self.valid_moves_from(item.cur, None).into_iter() {
@@ -556,12 +589,16 @@ impl GameState {
         self.fence_state.valid_moves_from(loc, other_loc)
     }
 
-    fn first_player_shortest_distance_to_goal(&self) -> Option<Vec<[u8; 2]>> {
-        self.fence_state.shortest_distance(self.location[0], 0)
+    fn goal_r_for_player(player: Player) -> u8 {
+        match player {
+            Player::Player1 => 0,
+            Player::Player2 => BOARD_HEIGHT - 1,
+        }
     }
 
-    fn second_player_shortest_distance_to_goal(&self) -> Option<Vec<[u8; 2]>> {
-        self.fence_state.shortest_distance(self.location[1], BOARD_HEIGHT - 1)
+    fn player_shortest_distance_to_goal(&self, player: Player) -> Option<Path> {
+        self.fence_state
+            .shortest_distance(self.location[player as usize], Self::goal_r_for_player(player))
     }
 
     pub fn perform_action(
@@ -583,9 +620,9 @@ impl GameState {
             Action::Fence(new_fence) => {
                 let mut new_state = self.clone();
                 FenceState::try_place_fence(&mut new_state.fence_state, player, new_fence)?;
-                if new_state.second_player_shortest_distance_to_goal().is_none() {
+                if new_state.player_shortest_distance_to_goal(Player::Player2).is_none() {
                     Err("the fence causes the second player to be unable to reach the goal")
-                } else if new_state.first_player_shortest_distance_to_goal().is_none() {
+                } else if new_state.player_shortest_distance_to_goal(Player::Player1).is_none() {
                     Err("the fence causes the first player to be unable to reach the goal")
                 } else {
                     Ok(new_state)
@@ -628,16 +665,40 @@ impl GameState {
     pub fn produce_info(&self) -> String {
         let mut rv = String::new();
 
-        rv.push_str("First player shortest path:");
-        for path in self.first_player_shortest_distance_to_goal().unwrap().into_iter().rev() {
-            write!(rv, " {}", Action::Move(path)).unwrap();
-        }
-        rv.push('\n');
+        for player in [Player::Player1, Player::Player2].into_iter() {
+            let cur_player_shortest = self.player_shortest_distance_to_goal(player).unwrap();
+            writeln!(rv, "{} shortest path:{}", player, cur_player_shortest).unwrap();
 
-        rv.push_str("Second player shortest path:");
-        for path in self.second_player_shortest_distance_to_goal().unwrap().into_iter().rev() {
-            write!(rv, " {}", Action::Move(path)).unwrap();
+            // Find the single fence that would result in the biggest increase
+            // in shortest distance.
+            match cur_player_shortest
+                .0
+                .windows(2)
+                .flat_map(|step| {
+                    let (fo, [f1, f2]) = FenceState::blocking_fences(step[0], step[1]);
+                    [Action::Fence((f1, fo)), Action::Fence((f2, fo))]
+                })
+                .filter_map(|act| self.perform_action(player.other(), act).ok().map(|s| (act, s)))
+                .map(|(act, gs)| (act, gs.player_shortest_distance_to_goal(player).unwrap()))
+                .max_by_key(|(_, path)| path.0.len())
+            {
+                Some((act, path)) if path.0.len() > cur_player_shortest.0.len() => writeln!(
+                    rv,
+                    "Fence for {} that causes the most increase in shortest distance: {} \
+                     (increase from {} to {}):{}",
+                    player,
+                    act,
+                    cur_player_shortest.0.len() - 1,
+                    path.0.len() - 1,
+                    path
+                )
+                .unwrap(),
+                _ =>
+                    writeln!(rv, "No fence for {} can cause increase in shortest distance", player)
+                        .unwrap(),
+            }
         }
+
         rv
     }
 }

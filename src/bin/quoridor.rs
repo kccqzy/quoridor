@@ -25,12 +25,12 @@ fn clear_screen() -> std::io::Result<()> {
 fn main() {
     let mut gs = vec![GameState::new()];
     let mut current_player = Player::Player1;
-    let mut current_message = "New Game".into();
+    let mut current_message: String = "New Game".into();
 
     while !gs.last().unwrap().is_game_complete() {
         clear_screen().unwrap();
         std::io::stdout().lock().write_all(gs.last().unwrap().draw(true).as_bytes()).unwrap();
-        println!("{}", current_message);
+        println!("{}", current_message.trim());
         println!("Current Player: {}", current_player);
 
         let mut input = String::new();
