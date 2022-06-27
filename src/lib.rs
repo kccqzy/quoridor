@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::fmt::Display;
 use std::fmt::Write;
 use std::rc::Rc;
@@ -464,13 +465,13 @@ impl FenceState {
         }
         impl Eq for HeapItem {}
         impl PartialOrd for HeapItem {
-            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
                 (other.dist_from_start + other.est_dist_to_finish)
                     .partial_cmp(&(self.dist_from_start + self.est_dist_to_finish))
             }
         }
         impl Ord for HeapItem {
-            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            fn cmp(&self, other: &Self) -> Ordering {
                 (other.dist_from_start + other.est_dist_to_finish)
                     .cmp(&(self.dist_from_start + self.est_dist_to_finish))
             }
@@ -541,6 +542,27 @@ impl FenceState {
             }
         }
     }
+}
+
+fn max_by_key_with_ties<It: Iterator, B: Ord, F>(it: It, mut f: F) -> Vec<It::Item>
+where
+    F: FnMut(&It::Item) -> B,
+{
+    let mut rv = vec![];
+    for el in it {
+        match rv.last() {
+            None => rv.push(el),
+            Some(top) => match f(top).cmp(&f(&el)) {
+                Ordering::Less => {
+                    rv.clear();
+                    rv.push(el);
+                }
+                Ordering::Equal => rv.push(el),
+                Ordering::Greater => {}
+            },
+        };
+    }
+    rv
 }
 
 #[derive(Debug, Clone)]
@@ -669,30 +691,39 @@ impl GameState {
             let cur_player_shortest = self.player_shortest_distance_to_goal(player).unwrap();
             writeln!(rv, "{} shortest path:{}", player, cur_player_shortest).unwrap();
 
-            // Find the single fence that would result in the biggest increase
-            // in shortest distance.
-            match cur_player_shortest
-                .0
-                .windows(2)
-                .flat_map(|step| {
-                    let (fo, [f1, f2]) = FenceState::blocking_fences(step[0], step[1]);
-                    [Action::Fence((f1, fo)), Action::Fence((f2, fo))]
-                })
-                .filter_map(|act| self.perform_action(player.other(), act).ok().map(|s| (act, s)))
-                .map(|(act, gs)| (act, gs.player_shortest_distance_to_goal(player).unwrap()))
-                .max_by_key(|(_, path)| path.0.len())
-            {
-                Some((act, path)) if path.0.len() > cur_player_shortest.0.len() => writeln!(
-                    rv,
-                    "Fence for {} that causes the most increase in shortest distance: {} \
-                     (increase from {} to {}):{}",
-                    player,
-                    act,
-                    cur_player_shortest.0.len() - 1,
-                    path.0.len() - 1,
-                    path
-                )
-                .unwrap(),
+            // Find the fences that would result in the biggest increase in
+            // shortest distance.
+            let worst_fences = max_by_key_with_ties(
+                cur_player_shortest
+                    .0
+                    .windows(2)
+                    .flat_map(|step| {
+                        let (fo, [f1, f2]) = FenceState::blocking_fences(step[0], step[1]);
+                        [Action::Fence((f1, fo)), Action::Fence((f2, fo))]
+                    })
+                    .filter_map(|act| {
+                        self.perform_action(player.other(), act).ok().map(|s| (act, s))
+                    })
+                    .map(|(act, gs)| (act, gs.player_shortest_distance_to_goal(player).unwrap())),
+                |(_, p)| p.0.len(),
+            );
+            match worst_fences.split_first() {
+                Some(((act, path), tail)) if path.0.len() > cur_player_shortest.0.len() => {
+                    writeln!(
+                        rv,
+                        "Fence for {} that causes the most increase in shortest distance: {} \
+                         (increase from {} to {}):{}",
+                        player,
+                        act,
+                        cur_player_shortest.0.len() - 1,
+                        path.0.len() - 1,
+                        path
+                    )
+                    .unwrap();
+                    for (act, path) in tail {
+                        writeln!(rv, "Or fence {}:{}", act, path).unwrap();
+                    }
+                }
                 _ =>
                     writeln!(rv, "No fence for {} can cause increase in shortest distance", player)
                         .unwrap(),
