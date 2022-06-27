@@ -487,10 +487,11 @@ impl FenceState {
         }]);
         visited[from[0] as usize][from[1] as usize] = true;
         while let Some(item) = queue.pop() {
+            steps.push((item.prev, item.cur));
             if item.est_dist_to_finish == 0 {
                 // Found. We just need to reconstruct the path.
-                let mut path = vec![item.cur, item.prev];
-                let mut cur = item.prev;
+                let mut path = vec![item.cur];
+                let mut cur = item.cur;
                 for (prev, next) in steps.into_iter().skip(1).rev() {
                     if cur == next {
                         path.push(prev);
@@ -498,9 +499,9 @@ impl FenceState {
                     }
                 }
                 assert_eq!(*path.last().unwrap(), from);
+                assert_eq!(path.len() - 1, item.dist_from_start as usize);
                 return Some(Path(path));
             }
-            steps.push((item.prev, item.cur));
             for new_loc in self.valid_moves_from(item.cur, None).into_iter() {
                 let visited = &mut visited[new_loc[0] as usize][new_loc[1] as usize];
                 if !*visited {
