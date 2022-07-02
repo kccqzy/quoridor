@@ -188,6 +188,9 @@ impl Player {
             Player::Player2 => Player::Player1,
         }
     }
+    pub fn iterator() -> impl Iterator<Item = Player> {
+        [Player::Player1, Player::Player2].iter().copied()
+    }
 }
 
 impl Display for Player {
@@ -310,6 +313,7 @@ impl std::str::FromStr for Direction {
 }
 
 /// A path of coordinates from destination to source.
+#[derive(Default, Debug, Clone)]
 struct Path(Vec<[u8; 2]>);
 
 impl Display for Path {
@@ -520,8 +524,8 @@ impl FenceState {
     }
 
     fn try_place_fence(
-        this: &mut Rc<Self>, player: Player, (loc @ [r, c], o): ([u8; 2], FenceOrientation),
-    ) -> std::result::Result<(), &'static str> {
+        mut this: Rc<Self>, player: Player, (loc @ [r, c], o): ([u8; 2], FenceOrientation),
+    ) -> std::result::Result<Rc<Self>, &'static str> {
         if !(r < BOARD_HEIGHT - 1 && c < BOARD_WIDTH - 1) {
             Err("cannot place fences on a border or outside the boundary")
         } else if this.remaining(player) == 0 {
@@ -535,11 +539,11 @@ impl FenceState {
             if potential_overlap.into_iter().any(|floc| this.has(floc, o)) {
                 Err("cannot place fence that overlaps with an existing fence")
             } else {
-                let inner: &mut Self = Rc::make_mut(this);
+                let inner: &mut Self = Rc::make_mut(&mut this);
                 let index = r * (BOARD_WIDTH - 1) + c;
                 inner.fences[o as usize] |= 1 << index;
                 inner.fences_remaining[player as usize] -= 1;
-                Ok(())
+                Ok(this)
             }
         }
     }
@@ -566,15 +570,38 @@ where
     rv
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct GameState {
     fence_state: Rc<FenceState>,
     location: [[u8; 2]; 2],
+    shortest_path: [Rc<Path>; 2],
 }
 
 impl GameState {
+    fn recalc_shortest_path(mut self) -> Result<Self, String> {
+        for player in Player::iterator() {
+            let actual_shortest_path = self
+                .fence_state
+                .shortest_distance(self.location[player as usize], Self::goal_r_for_player(player))
+                .ok_or_else(|| {
+                    format!("{} no longer has a path towards the destination", player)
+                })?;
+
+            if self.shortest_path[player as usize].0 != actual_shortest_path.0 {
+                *Rc::make_mut(&mut self.shortest_path[player as usize]) = actual_shortest_path;
+            }
+        }
+        Ok(self)
+    }
+
     pub fn new() -> GameState {
-        GameState { fence_state: Rc::new(FenceState::new()), location: [[8, 4], [0, 4]] }
+        GameState {
+            fence_state: Rc::new(FenceState::new()),
+            location: [[8, 4], [0, 4]],
+            shortest_path: Default::default(),
+        }
+        .recalc_shortest_path()
+        .unwrap()
     }
 
     pub fn draw(&self, show_next_moves: bool) -> String {
@@ -619,38 +646,38 @@ impl GameState {
         }
     }
 
-    fn player_shortest_distance_to_goal(&self, player: Player) -> Option<Path> {
-        self.fence_state
-            .shortest_distance(self.location[player as usize], Self::goal_r_for_player(player))
-    }
-
     pub fn perform_action(
         &self, player: Player, action: Action,
-    ) -> std::result::Result<Self, &'static str> {
+    ) -> std::result::Result<Self, String> {
         if self.is_game_complete() {
-            return Err("cannot move because game is over");
+            return Err("cannot move because game is over".into());
         }
         match action {
             Action::Move(new_loc) => {
                 if self.valid_moves(player).iter().any(|&valid_loc| valid_loc == new_loc) {
-                    let mut new_state = self.clone();
+                    let mut new_state = GameState {
+                        fence_state: self.fence_state.clone(),
+                        location: self.location,
+                        shortest_path: self.shortest_path.clone(),
+                    };
                     new_state.location[player as usize] = new_loc;
-                    Ok(new_state)
+                    Ok(new_state
+                        .recalc_shortest_path()
+                        .expect("moving should not cause a path to disappear".into()))
                 } else {
-                    Err("the location of the move is not allowed")
+                    Err("the location of the move is not allowed".into())
                 }
             }
-            Action::Fence(new_fence) => {
-                let mut new_state = self.clone();
-                FenceState::try_place_fence(&mut new_state.fence_state, player, new_fence)?;
-                if new_state.player_shortest_distance_to_goal(Player::Player2).is_none() {
-                    Err("the fence causes the second player to be unable to reach the goal")
-                } else if new_state.player_shortest_distance_to_goal(Player::Player1).is_none() {
-                    Err("the fence causes the first player to be unable to reach the goal")
-                } else {
-                    Ok(new_state)
-                }
+            Action::Fence(new_fence) => GameState {
+                fence_state: FenceState::try_place_fence(
+                    self.fence_state.clone(),
+                    player,
+                    new_fence,
+                )?,
+                location: self.location,
+                shortest_path: self.shortest_path.clone(),
             }
+            .recalc_shortest_path(),
         }
     }
 
@@ -688,8 +715,8 @@ impl GameState {
     pub fn produce_info(&self) -> String {
         let mut rv = String::new();
 
-        for player in [Player::Player1, Player::Player2].into_iter() {
-            let cur_player_shortest = self.player_shortest_distance_to_goal(player).unwrap();
+        for player in Player::iterator() {
+            let cur_player_shortest = &self.shortest_path[player as usize];
             writeln!(rv, "{} shortest path:{}", player, cur_player_shortest).unwrap();
 
             // Find the fences that would result in the biggest increase in
@@ -705,7 +732,7 @@ impl GameState {
                     .filter_map(|act| {
                         self.perform_action(player.other(), act).ok().map(|s| (act, s))
                     })
-                    .map(|(act, gs)| (act, gs.player_shortest_distance_to_goal(player).unwrap())),
+                    .map(|(act, gs)| (act, gs.shortest_path[player as usize].clone())),
                 |(_, p)| p.0.len(),
             );
             match worst_fences.split_first() {
