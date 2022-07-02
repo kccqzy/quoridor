@@ -14,7 +14,7 @@ const PLAYER_2_SYMBOL: char = '●';
 const PLAYER_1_NEXT_SYMBOL: char = '□';
 const PLAYER_2_NEXT_SYMBOL: char = '○';
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, PartialOrd, Ord)]
 pub enum FenceOrientation {
     Vertical = 0,
     Horizontal = 1,
@@ -202,10 +202,13 @@ impl Display for Player {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Fence([u8; 2], FenceOrientation);
+
 #[derive(Debug, Clone, Copy)]
 pub enum Action {
     Move([u8; 2]),
-    Fence(([u8; 2], FenceOrientation)),
+    Fence(Fence),
 }
 
 impl TryFrom<&[u8]> for Action {
@@ -228,9 +231,9 @@ impl TryFrom<&[u8]> for Action {
         };
         if value.len() == 3 {
             if value[2] == b'h' {
-                Ok(Action::Fence(([r, c], FenceOrientation::Horizontal)))
+                Ok(Action::Fence(Fence([r, c], FenceOrientation::Horizontal)))
             } else if value[2] == b'v' {
-                Ok(Action::Fence(([r, c], FenceOrientation::Vertical)))
+                Ok(Action::Fence(Fence([r, c], FenceOrientation::Vertical)))
             } else {
                 Err("third character must be 'h' or 'v'")
             }
@@ -254,7 +257,7 @@ impl Display for Action {
                 let out = [b'a' + c, b'1' + (BOARD_HEIGHT - 1 - r)];
                 f.write_str(std::str::from_utf8(&out).unwrap())
             }
-            Action::Fence(([r, c], o)) => {
+            Action::Fence(Fence([r, c], o)) => {
                 let out = [b'a' + c, b'1' + (BOARD_HEIGHT - 1 - r), match o {
                     FenceOrientation::Horizontal => b'h',
                     FenceOrientation::Vertical => b'v',
@@ -524,7 +527,7 @@ impl FenceState {
     }
 
     fn try_place_fence(
-        mut this: Rc<Self>, player: Player, (loc @ [r, c], o): ([u8; 2], FenceOrientation),
+        mut this: Rc<Self>, player: Player, Fence(loc @ [r, c], o): Fence,
     ) -> std::result::Result<Rc<Self>, &'static str> {
         if !(r < BOARD_HEIGHT - 1 && c < BOARD_WIDTH - 1) {
             Err("cannot place fences on a border or outside the boundary")
@@ -716,45 +719,126 @@ impl GameState {
         let mut rv = String::new();
 
         for player in Player::iterator() {
+            let valid_moves = self.valid_moves(player);
+            write!(rv, "{} valid moves:", player).unwrap();
+            for m in valid_moves.into_iter() {
+                write!(rv, " {}", Action::Move(m)).unwrap();
+            }
+            rv.push_str("\n");
+
             let cur_player_shortest = &self.shortest_path[player as usize];
             writeln!(rv, "{} shortest path:{}", player, cur_player_shortest).unwrap();
 
             // Find the fences that would result in the biggest increase in
-            // shortest distance.
-            let worst_fences = max_by_key_with_ties(
-                cur_player_shortest
-                    .0
-                    .windows(2)
-                    .flat_map(|step| {
-                        let (fo, [f1, f2]) = FenceState::blocking_fences(step[0], step[1]);
-                        [Action::Fence((f1, fo)), Action::Fence((f2, fo))]
-                    })
-                    .filter_map(|act| {
-                        self.perform_action(player.other(), act).ok().map(|s| (act, s))
-                    })
-                    .map(|(act, gs)| (act, gs.shortest_path[player as usize].clone())),
-                |(_, p)| p.0.len(),
-            );
+            // shortest distance. Note that we first collect all possible
+            // fences. This is because later on, when calculating the two worst
+            // fences, each individual among the pair might not be the worst.
+            let fences = cur_player_shortest
+                .0
+                .windows(2)
+                .flat_map(|step| {
+                    let (fo, [f1, f2]) = FenceState::blocking_fences(step[0], step[1]);
+                    [Fence(f1, fo), Fence(f2, fo)]
+                })
+                .filter_map(|f| {
+                    self.perform_action(player.other(), Action::Fence(f)).ok().map(|s| (f, s))
+                })
+                .map(|(act, gs)| {
+                    let p = gs.shortest_path[player as usize].clone();
+                    (act, gs, p)
+                })
+                .collect::<Vec<_>>();
+            let worst_fences = max_by_key_with_ties(fences.iter(), |(_, _, p)| p.0.len());
+
             match worst_fences.split_first() {
-                Some(((act, path), tail)) if path.0.len() > cur_player_shortest.0.len() => {
+                Some(((f, _, path), tail)) if path.0.len() > cur_player_shortest.0.len() => {
                     writeln!(
                         rv,
                         "Fence for {} that causes the most increase in shortest distance: {} \
                          (increase from {} to {}):{}",
                         player,
-                        act,
+                        Action::Fence(*f),
                         cur_player_shortest.0.len() - 1,
                         path.0.len() - 1,
                         path
                     )
                     .unwrap();
-                    for (act, path) in tail {
-                        writeln!(rv, "Or fence {}:{}", act, path).unwrap();
+                    for (f, _, path) in tail {
+                        writeln!(rv, "Or fence {}:{}", Action::Fence(*f), path).unwrap();
                     }
                 }
                 _ =>
                     writeln!(rv, "No fence for {} can cause increase in shortest distance", player)
                         .unwrap(),
+            }
+
+            use std::collections::btree_map::Entry;
+            use std::collections::BTreeMap;
+            let mut worst_two_fences: BTreeMap<(Fence, Fence), Rc<Path>> = BTreeMap::new();
+
+            for (first_fence, gs, path) in fences.into_iter() {
+                let second_fences = path.0.windows(2).flat_map(|step| {
+                    let (fo, [f1, f2]) = FenceState::blocking_fences(step[0], step[1]);
+                    [Fence(f1, fo), Fence(f2, fo)]
+                });
+                for second_fence in second_fences {
+                    let two_fences = match first_fence.cmp(&second_fence) {
+                        Ordering::Less => (first_fence, second_fence),
+                        Ordering::Equal => continue,
+                        Ordering::Greater => (second_fence, first_fence),
+                    };
+                    match worst_two_fences.entry(two_fences) {
+                        Entry::Vacant(v) => {
+                            v.insert(
+                                match gs.perform_action(player.other(), Action::Fence(second_fence))
+                                {
+                                    Ok(new_gs) => new_gs.shortest_path[player as usize].clone(),
+                                    Err(_) => continue,
+                                },
+                            );
+                        }
+                        Entry::Occupied(o) => debug_assert_eq!(
+                            o.get().0,
+                            gs.perform_action(player, Action::Fence(second_fence))
+                                .expect(
+                                    "internal error: two fences were previously determined to be \
+                                     valid but are now invalid"
+                                )
+                                .shortest_path[player as usize]
+                                .clone()
+                                .0
+                        ),
+                    }
+                }
+            }
+            let worst_two_fences =
+                max_by_key_with_ties(worst_two_fences.into_iter(), |(_, p)| p.0.len());
+            match worst_two_fences.split_first() {
+                Some((((f1, f2), path), tail)) if path.0.len() > cur_player_shortest.0.len() => {
+                    writeln!(
+                        rv,
+                        "Two fences for {} that causes the most increase in shortest distance: \
+                         {}+{} (increase from {} to {}):{}",
+                        player,
+                        Action::Fence(*f1),
+                        Action::Fence(*f2),
+                        cur_player_shortest.0.len() - 1,
+                        path.0.len() - 1,
+                        path
+                    )
+                    .unwrap();
+                    for ((f1, f2), path) in tail {
+                        writeln!(
+                            rv,
+                            "Or fence {}+{}:{}",
+                            Action::Fence(*f1),
+                            Action::Fence(*f2),
+                            path
+                        )
+                        .unwrap();
+                    }
+                }
+                _ => {}
             }
         }
 
