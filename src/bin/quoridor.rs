@@ -23,6 +23,7 @@ fn clear_screen() -> std::io::Result<()> {
 }
 
 fn main() {
+    use std::fmt::Write;
     let new_game = GameState::new();
 
     let mut states = Vec::new();
@@ -40,10 +41,12 @@ fn main() {
         println!("{}", current_message.trim());
         println!("Current Player: {}", current_player);
 
+        current_message.clear();
+
         let mut input = String::new();
         std::io::stdin().read_line(&mut input).unwrap();
         if !input.is_ascii() {
-            current_message = "not an ASCII string".into();
+            current_message.push_str("not an ASCII string");
             continue;
         }
         input.make_ascii_lowercase();
@@ -54,21 +57,19 @@ fn main() {
         }
         if input == "undo" {
             if states.is_empty() {
-                current_message = "Cannot undo beyond the first action".into();
+                current_message.push_str("Cannot undo beyond the first action");
             } else {
-                current_message = "Undo!".into();
+                current_message.push_str("Undo!");
                 current_player = current_player.other();
                 states.pop();
             }
             continue;
         }
         if input == "info" {
-            current_message = cur.produce_info();
+            cur.produce_info(&mut current_message);
             continue;
         }
         if input == "history" {
-            use std::fmt::Write;
-            current_message.clear();
             for (i, (act, _)) in states.iter().enumerate() {
                 if i % 2 == 0 {
                     writeln!(current_message, "{:>2}. {}", 1 + (i >> 1), act).unwrap();
@@ -81,21 +82,22 @@ fn main() {
         if input == "restart" {
             states.clear();
             current_player = Player::Player1;
-            current_message = "New Game".into();
+            current_message.push_str("New Game");
             continue;
         }
         match cur.parse_move_for_player(current_player, input) {
             Err(msg) => {
-                current_message = format!("I don't recognize that: {}", msg);
+                write!(current_message, "I don't recognize that: {}", msg).unwrap();
             }
             Ok(act) => {
                 eprintln!("Action parsed: {:?}", act);
                 match cur.perform_action(current_player, act) {
                     Err(msg) => {
-                        current_message = format!("That move was not valid: {}", msg);
+                        write!(current_message, "That move was not valid: {}", msg).unwrap();
                     }
                     Ok(new_gs) => {
-                        current_message = format!("Last action by {}: {}", current_player, act);
+                        write!(current_message, "Last action by {}: {}", current_player, act)
+                            .unwrap();
                         current_player = current_player.other();
                         states.push((act, new_gs));
                     }

@@ -1,6 +1,5 @@
 use std::cmp::Ordering;
 use std::fmt::Display;
-use std::fmt::Write;
 use std::rc::Rc;
 
 const BOARD_WIDTH: u8 = 9;
@@ -581,13 +580,16 @@ pub struct GameState {
 }
 
 impl GameState {
-    fn recalc_shortest_path(mut self) -> Result<Self, String> {
+    fn recalc_shortest_path(mut self) -> Result<Self, &'static str> {
         for player in Player::iterator() {
             let actual_shortest_path = self
                 .fence_state
                 .shortest_distance(self.location[player as usize], Self::goal_r_for_player(player))
-                .ok_or_else(|| {
-                    format!("{} no longer has a path towards the destination", player)
+                .ok_or_else(|| match player {
+                    Player::Player1 =>
+                        "the first player would no longer have a path towards destination",
+                    Player::Player2 =>
+                        "the second player would no longer have a path towards destination",
                 })?;
 
             if self.shortest_path[player as usize].0 != actual_shortest_path.0 {
@@ -651,9 +653,9 @@ impl GameState {
 
     pub fn perform_action(
         &self, player: Player, action: Action,
-    ) -> std::result::Result<Self, String> {
+    ) -> std::result::Result<Self, &'static str> {
         if self.is_game_complete() {
-            return Err("cannot move because game is over".into());
+            return Err("cannot move because game is over");
         }
         match action {
             Action::Move(new_loc) => {
@@ -666,9 +668,9 @@ impl GameState {
                     new_state.location[player as usize] = new_loc;
                     Ok(new_state
                         .recalc_shortest_path()
-                        .expect("moving should not cause a path to disappear".into()))
+                        .expect("moving should not cause a path to disappear"))
                 } else {
-                    Err("the location of the move is not allowed".into())
+                    Err("the location of the move is not allowed")
                 }
             }
             Action::Fence(new_fence) => GameState {
@@ -715,16 +717,14 @@ impl GameState {
         }
     }
 
-    pub fn produce_info(&self) -> String {
-        let mut rv = String::new();
-
+    pub fn produce_info(&self, rv: &mut impl std::fmt::Write) {
         for player in Player::iterator() {
             let valid_moves = self.valid_moves(player);
             write!(rv, "{} valid moves:", player).unwrap();
             for m in valid_moves.into_iter() {
                 write!(rv, " {}", Action::Move(m)).unwrap();
             }
-            rv.push_str("\n");
+            rv.write_str("\n").unwrap();
 
             let cur_player_shortest = &self.shortest_path[player as usize];
             writeln!(rv, "{} shortest path:{}", player, cur_player_shortest).unwrap();
@@ -841,7 +841,5 @@ impl GameState {
                 _ => {}
             }
         }
-
-        rv
     }
 }
