@@ -23,13 +23,20 @@ fn clear_screen() -> std::io::Result<()> {
 }
 
 fn main() {
-    let mut gs = vec![GameState::new()];
+    let new_game = GameState::new();
+
+    let mut states = Vec::new();
     let mut current_player = Player::Player1;
     let mut current_message: String = "New Game".into();
 
-    while !gs.last().unwrap().is_game_complete() {
+    loop {
+        let cur = states.last().map_or(&new_game, |(_, g)| g);
+
         clear_screen().unwrap();
-        std::io::stdout().lock().write_all(gs.last().unwrap().draw(true).as_bytes()).unwrap();
+        std::io::stdout().lock().write_all(cur.draw(true).as_bytes()).unwrap();
+        if cur.is_game_complete() {
+            println!("Game Over.");
+        }
         println!("{}", current_message.trim());
         println!("Current Player: {}", current_player);
 
@@ -46,33 +53,51 @@ fn main() {
             break;
         }
         if input == "undo" {
-            if gs.len() > 1 {
+            if states.is_empty() {
+                current_message = "Cannot undo beyond the first action".into();
+            } else {
                 current_message = "Undo!".into();
                 current_player = current_player.other();
-                gs.pop();
-            } else {
-                current_message = "Cannot undo beyond the first".into();
+                states.pop();
             }
             continue;
         }
         if input == "info" {
-            current_message = gs.last().unwrap().produce_info();
+            current_message = cur.produce_info();
             continue;
         }
-        match gs.last().unwrap().parse_move_for_player(current_player, input) {
+        if input == "history" {
+            use std::fmt::Write;
+            current_message.clear();
+            for (i, (act, _)) in states.iter().enumerate() {
+                if i % 2 == 0 {
+                    writeln!(current_message, "{:>2}. {}", 1 + (i >> 1), act).unwrap();
+                } else {
+                    writeln!(current_message, "    {}", act).unwrap();
+                }
+            }
+            continue;
+        }
+        if input == "restart" {
+            states.clear();
+            current_player = Player::Player1;
+            current_message = "New Game".into();
+            continue;
+        }
+        match cur.parse_move_for_player(current_player, input) {
             Err(msg) => {
                 current_message = format!("I don't recognize that: {}", msg);
             }
             Ok(act) => {
                 eprintln!("Action parsed: {:?}", act);
-                match gs.last().unwrap().perform_action(current_player, act) {
+                match cur.perform_action(current_player, act) {
                     Err(msg) => {
                         current_message = format!("That move was not valid: {}", msg);
                     }
                     Ok(new_gs) => {
-                        current_message = format!("Last action by {}: {}", current_player, input);
+                        current_message = format!("Last action by {}: {}", current_player, act);
                         current_player = current_player.other();
-                        gs.push(new_gs);
+                        states.push((act, new_gs));
                     }
                 }
             }
