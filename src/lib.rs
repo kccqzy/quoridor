@@ -19,6 +19,15 @@ pub enum FenceOrientation {
     Horizontal = 1,
 }
 
+impl FenceOrientation {
+    pub fn other(&self) -> Self {
+        match *self {
+            FenceOrientation::Horizontal => FenceOrientation::Vertical,
+            FenceOrientation::Vertical => FenceOrientation::Horizontal,
+        }
+    }
+}
+
 pub fn draw_unicode_box(
     horizontal_label: &[char], vertical_label: &[char], in_box_label: impl Fn(u8, u8) -> char,
     canonical_fence: impl Fn(u8, u8) -> Option<FenceOrientation>,
@@ -174,7 +183,7 @@ mod tests {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Player {
     Player1 = 0,
     Player2 = 1,
@@ -259,7 +268,7 @@ impl Display for Action {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionError {
     FenceOutsideBoundary,
     NoRemainingFence,
@@ -720,6 +729,67 @@ impl GameState {
         }
     }
 
+    fn find_obstructing_fence(&self, player: Player) -> std::collections::BTreeSet<Fence> {
+        self.shortest_path[player as usize]
+            .0
+            .windows(2)
+            .flat_map(|step| {
+                let (fo, [f1, f2]) = FenceState::blocking_fences(step[0], step[1]);
+                [Fence(f1, fo), Fence(f2, fo)]
+            })
+            .collect()
+    }
+
+    fn produce_defending_fence_info(
+        &self, fut: &Self, player: Player, proposed_opponent_fences: &[Fence],
+        rv: &mut impl std::io::Write,
+    ) -> std::io::Result<()> {
+        // The defending fence can block off an alternative route, or it simply
+        // prevents the current fence from being placed by having an overlap or
+        // at the same location.
+        let mut defending_fences = fut.find_obstructing_fence(player);
+        defending_fences.retain(|&f| {
+            matches!(fut.perform_action(player, Action::Fence(f)),
+                     Err(ActionError::PlayerHasNoPath(p)) if p == player)
+                && matches!(self.perform_action(player, Action::Fence(f)),
+                            Ok(gs)
+                            if gs.shortest_path[player as usize].0.len()
+                            == self.shortest_path[player as usize].0.len())
+        });
+        defending_fences.extend(
+            proposed_opponent_fences
+                .iter()
+                .flat_map(|&f @ Fence(_, o)| {
+                    let mut fences = [f; 3];
+                    // The first one simply rotates the given fence.
+                    fences[0].1 = o.other();
+                    // The second one is the given fence translated along the longitudinal direction
+                    // by 1.
+                    fences[1].0[o as usize] += 1;
+                    // The third one is the given fence translated along the longitudinal direction
+                    // by -1.
+                    fences[2].0[o as usize] = fences[2].0[o as usize].wrapping_add(255);
+                    fences
+                })
+                .inspect(|f| debug_assert!(fut.perform_action(player, Action::Fence(*f)).is_err()))
+                .filter(|&f| {
+                    matches!(self.perform_action(player, Action::Fence(f)),
+                                      Ok(gs)
+                                      if gs.shortest_path[player as usize].0.len()
+                                      == self.shortest_path[player as usize].0.len())
+                }),
+        );
+        let mut defending_fences = defending_fences.into_iter();
+        if let Some(df) = defending_fences.next() {
+            write!(rv, " (To defend, try fence {}", Action::Fence(df))?;
+            for df in defending_fences {
+                write!(rv, " or {}", Action::Fence(df))?;
+            }
+            write!(rv, ")\n")?;
+        }
+        Ok(())
+    }
+
     pub fn produce_info(&self, rv: &mut impl std::io::Write) -> std::io::Result<()> {
         for player in Player::iterator() {
             let valid_moves = self.valid_moves(player);
@@ -736,13 +806,9 @@ impl GameState {
             // shortest distance. Note that we first collect all possible
             // fences. This is because later on, when calculating the two worst
             // fences, each individual among the pair might not be the worst.
-            let fences = cur_player_shortest
-                .0
-                .windows(2)
-                .flat_map(|step| {
-                    let (fo, [f1, f2]) = FenceState::blocking_fences(step[0], step[1]);
-                    [Fence(f1, fo), Fence(f2, fo)]
-                })
+            let fences = self
+                .find_obstructing_fence(player)
+                .into_iter()
                 .filter_map(|f| {
                     self.perform_action(player.other(), Action::Fence(f)).ok().map(|s| (f, s))
                 })
@@ -754,7 +820,7 @@ impl GameState {
             let worst_fences = max_by_key_with_ties(fences.iter(), |(_, _, p)| p.0.len());
 
             match worst_fences.split_first() {
-                Some(((f, _, path), tail)) if path.0.len() > cur_player_shortest.0.len() => {
+                Some(((f, gs, path), tail)) if path.0.len() > cur_player_shortest.0.len() => {
                     writeln!(
                         rv,
                         "Fence for {} that causes the most increase in shortest distance: {} \
@@ -765,8 +831,10 @@ impl GameState {
                         path.0.len() - 1,
                         path
                     )?;
-                    for (f, _, path) in tail {
+                    self.produce_defending_fence_info(gs, player, &[*f], rv)?;
+                    for (f, gs, path) in tail {
                         writeln!(rv, "Or fence {}:{}", Action::Fence(*f), path)?;
+                        self.produce_defending_fence_info(gs, player, &[*f], rv)?;
                     }
                 }
                 _ =>
@@ -775,13 +843,11 @@ impl GameState {
 
             use std::collections::btree_map::Entry;
             use std::collections::BTreeMap;
-            let mut worst_two_fences: BTreeMap<(Fence, Fence), Rc<Path>> = BTreeMap::new();
+            let mut worst_two_fences: BTreeMap<(Fence, Fence), (GameState, Rc<Path>)> =
+                BTreeMap::new();
 
-            for (first_fence, gs, path) in fences.into_iter() {
-                let second_fences = path.0.windows(2).flat_map(|step| {
-                    let (fo, [f1, f2]) = FenceState::blocking_fences(step[0], step[1]);
-                    [Fence(f1, fo), Fence(f2, fo)]
-                });
+            for (first_fence, gs, _) in fences.into_iter() {
+                let second_fences = gs.find_obstructing_fence(player);
                 for second_fence in second_fences {
                     let two_fences = match first_fence.cmp(&second_fence) {
                         Ordering::Less => (first_fence, second_fence),
@@ -793,29 +859,33 @@ impl GameState {
                             v.insert(
                                 match gs.perform_action(player.other(), Action::Fence(second_fence))
                                 {
-                                    Ok(new_gs) => new_gs.shortest_path[player as usize].clone(),
+                                    Ok(new_gs) => {
+                                        let p = new_gs.shortest_path[player as usize].clone();
+                                        (new_gs, p)
+                                    }
                                     Err(_) => continue,
                                 },
                             );
                         }
                         Entry::Occupied(o) => debug_assert_eq!(
-                            o.get().0,
+                            o.get().1 .0,
                             gs.perform_action(player, Action::Fence(second_fence))
                                 .expect(
                                     "internal error: two fences were previously determined to be \
                                      valid but are now invalid"
                                 )
                                 .shortest_path[player as usize]
-                                .clone()
                                 .0
                         ),
                     }
                 }
             }
             let worst_two_fences =
-                max_by_key_with_ties(worst_two_fences.into_iter(), |(_, p)| p.0.len());
+                max_by_key_with_ties(worst_two_fences.into_iter(), |(_, (_, p))| p.0.len());
             match worst_two_fences.split_first() {
-                Some((((f1, f2), path), tail)) if path.0.len() > cur_player_shortest.0.len() => {
+                Some((((f1, f2), (gs, path)), tail))
+                    if path.0.len() > cur_player_shortest.0.len() =>
+                {
                     writeln!(
                         rv,
                         "Two fences for {} that causes the most increase in shortest distance: \
@@ -827,7 +897,8 @@ impl GameState {
                         path.0.len() - 1,
                         path
                     )?;
-                    for ((f1, f2), path) in tail {
+                    self.produce_defending_fence_info(gs, player, &[*f1, *f2], rv)?;
+                    for ((f1, f2), (gs, path)) in tail {
                         writeln!(
                             rv,
                             "Or fence {}+{}:{}",
@@ -835,6 +906,7 @@ impl GameState {
                             Action::Fence(*f2),
                             path
                         )?;
+                        self.produce_defending_fence_info(gs, player, &[*f1, *f2], rv)?;
                     }
                 }
                 _ => {}
