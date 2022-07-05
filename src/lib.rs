@@ -213,31 +213,23 @@ pub enum Action {
 impl TryFrom<&[u8]> for Action {
     type Error = &'static str;
     fn try_from(value: &[u8]) -> std::result::Result<Self, Self::Error> {
-        if value.len() < 2 || value.len() > 3 {
-            return Err("length must be at least 2 and at most 3");
-        }
-        let first = value[0];
-        let c = if first >= b'a' && first <= b'i' {
-            first - b'a'
-        } else {
-            return Err("first character must be from 'a' to 'i'");
-        };
-        let second = value[1];
-        let r = if second >= b'1' && second <= b'9' {
-            BOARD_HEIGHT - (second - b'1') - 1
-        } else {
-            return Err("second character must be a digit from '1' to '9'");
-        };
-        if value.len() == 3 {
-            if value[2] == b'h' {
-                Ok(Action::Fence(Fence([r, c], FenceOrientation::Horizontal)))
-            } else if value[2] == b'v' {
-                Ok(Action::Fence(Fence([r, c], FenceOrientation::Vertical)))
-            } else {
-                Err("third character must be 'h' or 'v'")
+        match value {
+            [first @ b'a'..=b'i', second @ b'1'..=b'9'] => {
+                let c = first - b'a';
+                let r = BOARD_HEIGHT - (second - b'1') - 1;
+                Ok(Action::Move([r, c]))
             }
-        } else {
-            Ok(Action::Move([r, c]))
+            [first @ b'a'..=b'i', second @ b'1'..=b'9', third @ (b'h' | b'v')] => {
+                let c = first - b'a';
+                let r = BOARD_HEIGHT - (second - b'1') - 1;
+                let fo = if *third == b'h' {
+                    FenceOrientation::Horizontal
+                } else {
+                    FenceOrientation::Vertical
+                };
+                Ok(Action::Fence(Fence([r, c], fo)))
+            }
+            _ => Err("unrecognized command"),
         }
     }
 }
