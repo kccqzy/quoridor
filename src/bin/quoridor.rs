@@ -1,3 +1,4 @@
+use quoridor::ActionError;
 use quoridor::GameState;
 use quoridor::Player;
 use std::io::Write;
@@ -92,9 +93,25 @@ fn main() {
             Ok(act) => {
                 eprintln!("Action parsed: {:?}", act);
                 match cur.perform_action(current_player, act) {
-                    Err(msg) => {
-                        write!(current_message, "That move was not valid: {}", msg).unwrap();
-                    }
+                    Err(e) => write!(current_message, "That move was not valid: {}", match e {
+                        ActionError::FenceOutsideBoundary =>
+                            "the fence was on a border or outside the boundary",
+                        ActionError::NoRemainingFence =>
+                            "the current player has no more remaining fences",
+                        ActionError::OnTopOfExistingFence =>
+                            "the fence would be on top of an existing fence",
+                        ActionError::IntersectExistingFence =>
+                            "the fence would intersect an existing fence",
+                        ActionError::OverlapExistingFence =>
+                            "the fence would overlap an existing fence",
+                        ActionError::GameOver => "the game is already over",
+                        ActionError::InvalidMove => "the location of the move was not valid",
+                        ActionError::PlayerHasNoPath(Player::Player1) =>
+                            "the fence would cause the first player to have no path",
+                        ActionError::PlayerHasNoPath(Player::Player2) =>
+                            "the fence would cause the second player to have no path",
+                    })
+                    .unwrap(),
                     Ok(new_gs) => {
                         write!(current_message, "Last action by {}: {}", current_player, act)
                             .unwrap();

@@ -260,6 +260,18 @@ impl Display for Action {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub enum ActionError {
+    FenceOutsideBoundary,
+    NoRemainingFence,
+    OnTopOfExistingFence,
+    IntersectExistingFence,
+    OverlapExistingFence,
+    GameOver,
+    InvalidMove,
+    PlayerHasNoPath(Player),
+}
+
+#[derive(Debug, Clone, Copy)]
 enum Direction {
     North,
     East,
@@ -519,19 +531,23 @@ impl FenceState {
 
     fn try_place_fence(
         mut this: Rc<Self>, player: Player, Fence(loc @ [r, c], o): Fence,
-    ) -> std::result::Result<Rc<Self>, &'static str> {
+    ) -> std::result::Result<Rc<Self>, ActionError> {
         if !(r < BOARD_HEIGHT - 1 && c < BOARD_WIDTH - 1) {
-            Err("cannot place fences on a border or outside the boundary")
+            Err(ActionError::FenceOutsideBoundary)
         } else if this.remaining(player) == 0 {
-            Err("no more remaining fences")
-        } else if this.get(loc).is_some() {
-            Err("cannot place fence on top of or intersecting an existing fence")
+            Err(ActionError::NoRemainingFence)
+        } else if let Some(existing) = this.get(loc) {
+            Err(if existing == o {
+                ActionError::OnTopOfExistingFence
+            } else {
+                ActionError::IntersectExistingFence
+            })
         } else {
             let mut potential_overlap = [loc, loc];
             potential_overlap[0][o as usize] += 1;
             potential_overlap[1][o as usize] = potential_overlap[1][o as usize].wrapping_add(255);
             if potential_overlap.into_iter().any(|floc| this.has(floc, o)) {
-                Err("cannot place fence that overlaps with an existing fence")
+                Err(ActionError::OverlapExistingFence)
             } else {
                 let inner: &mut Self = Rc::make_mut(&mut this);
                 let index = r * (BOARD_WIDTH - 1) + c;
@@ -572,17 +588,12 @@ pub struct GameState {
 }
 
 impl GameState {
-    fn recalc_shortest_path(mut self) -> Result<Self, &'static str> {
+    fn recalc_shortest_path(mut self) -> Result<Self, ActionError> {
         for player in Player::iterator() {
             let actual_shortest_path = self
                 .fence_state
                 .shortest_distance(self.location[player as usize], Self::goal_r_for_player(player))
-                .ok_or_else(|| match player {
-                    Player::Player1 =>
-                        "the first player would no longer have a path towards destination",
-                    Player::Player2 =>
-                        "the second player would no longer have a path towards destination",
-                })?;
+                .ok_or(ActionError::PlayerHasNoPath(player))?;
 
             if self.shortest_path[player as usize].0 != actual_shortest_path.0 {
                 *Rc::make_mut(&mut self.shortest_path[player as usize]) = actual_shortest_path;
@@ -645,9 +656,9 @@ impl GameState {
 
     pub fn perform_action(
         &self, player: Player, action: Action,
-    ) -> std::result::Result<Self, &'static str> {
+    ) -> std::result::Result<Self, ActionError> {
         if self.is_game_complete() {
-            return Err("cannot move because game is over");
+            return Err(ActionError::GameOver);
         }
         match action {
             Action::Move(new_loc) => {
@@ -662,7 +673,7 @@ impl GameState {
                         .recalc_shortest_path()
                         .expect("moving should not cause a path to disappear"))
                 } else {
-                    Err("the location of the move is not allowed")
+                    Err(ActionError::InvalidMove)
                 }
             }
             Action::Fence(new_fence) => GameState {
