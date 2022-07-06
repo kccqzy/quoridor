@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::fmt::Display;
 use std::rc::Rc;
 
@@ -729,7 +730,7 @@ impl GameState {
         }
     }
 
-    fn find_obstructing_fence(&self, player: Player) -> std::collections::BTreeSet<Fence> {
+    fn find_obstructing_fence(&self, player: Player) -> BTreeSet<Fence> {
         self.shortest_path[player as usize]
             .0
             .windows(2)
@@ -740,54 +741,47 @@ impl GameState {
             .collect()
     }
 
-    fn produce_defending_fence_info(
+    fn defending_fences(
         &self, fut: &Self, player: Player, proposed_opponent_fences: &[Fence],
-        rv: &mut impl std::io::Write,
-    ) -> std::io::Result<()> {
+        rv: &mut BTreeSet<Fence>,
+    ) {
         // The defending fence can block off an alternative route, or it simply
         // prevents the current fence from being placed by having an overlap or
         // at the same location.
-        let mut defending_fences = fut.find_obstructing_fence(player);
-        defending_fences.retain(|&f| {
-            matches!(fut.perform_action(player, Action::Fence(f)),
-                     Err(ActionError::PlayerHasNoPath(p)) if p == player)
+        for f in fut.find_obstructing_fence(player) {
+            if !rv.contains(&f)
+                && matches!(fut.perform_action(player, Action::Fence(f)),
+                         Err(ActionError::PlayerHasNoPath(p)) if p == player)
                 && matches!(self.perform_action(player, Action::Fence(f)),
                             Ok(gs)
                             if gs.shortest_path[player as usize].0.len()
                             == self.shortest_path[player as usize].0.len())
-        });
-        defending_fences.extend(
-            proposed_opponent_fences
-                .iter()
-                .flat_map(|&f @ Fence(_, o)| {
-                    let mut fences = [f; 3];
-                    // The first one simply rotates the given fence.
-                    fences[0].1 = o.other();
-                    // The second one is the given fence translated along the longitudinal direction
-                    // by 1.
-                    fences[1].0[o as usize] += 1;
-                    // The third one is the given fence translated along the longitudinal direction
-                    // by -1.
-                    fences[2].0[o as usize] = fences[2].0[o as usize].wrapping_add(255);
-                    fences
-                })
-                .inspect(|f| debug_assert!(fut.perform_action(player, Action::Fence(*f)).is_err()))
-                .filter(|&f| {
-                    matches!(self.perform_action(player, Action::Fence(f)),
-                                      Ok(gs)
-                                      if gs.shortest_path[player as usize].0.len()
-                                      == self.shortest_path[player as usize].0.len())
-                }),
-        );
-        let mut defending_fences = defending_fences.into_iter();
-        if let Some(df) = defending_fences.next() {
-            write!(rv, " (To defend, try fence {}", Action::Fence(df))?;
-            for df in defending_fences {
-                write!(rv, " or {}", Action::Fence(df))?;
+            {
+                rv.insert(f);
             }
-            write!(rv, ")\n")?;
         }
-        Ok(())
+        for f in proposed_opponent_fences.iter().flat_map(|&f @ Fence(_, o)| {
+            let mut fences = [f; 3];
+            // The first one simply rotates the given fence.
+            fences[0].1 = o.other();
+            // The second one is the given fence translated along the longitudinal direction
+            // by 1.
+            fences[1].0[o as usize] += 1;
+            // The third one is the given fence translated along the longitudinal direction
+            // by -1.
+            fences[2].0[o as usize] = fences[2].0[o as usize].wrapping_add(255);
+            fences
+        }) {
+            debug_assert!(fut.perform_action(player, Action::Fence(f)).is_err());
+            if !rv.contains(&f)
+                && matches!(self.perform_action(player, Action::Fence(f)),
+                                 Ok(gs)
+                                 if gs.shortest_path[player as usize].0.len()
+                                 == self.shortest_path[player as usize].0.len())
+            {
+                rv.insert(f);
+            }
+        }
     }
 
     pub fn produce_info(&self, rv: &mut impl std::io::Write) -> std::io::Result<()> {
@@ -831,10 +825,19 @@ impl GameState {
                         path.0.len() - 1,
                         path
                     )?;
-                    self.produce_defending_fence_info(gs, player, &[*f], rv)?;
+                    let mut defend = BTreeSet::new();
+                    self.defending_fences(gs, player, &[*f], &mut defend);
                     for (f, gs, path) in tail {
                         writeln!(rv, "Or fence {}:{}", Action::Fence(*f), path)?;
-                        self.produce_defending_fence_info(gs, player, &[*f], rv)?;
+                        self.defending_fences(gs, player, &[*f], &mut defend);
+                    }
+                    // TODO: evaluate those fences before printing.
+                    if !defend.is_empty() {
+                        write!(rv, "Potential defending fences:")?;
+                        for f in defend {
+                            write!(rv, " {}", Action::Fence(f))?;
+                        }
+                        writeln!(rv)?;
                     }
                 }
                 _ =>
@@ -897,7 +900,8 @@ impl GameState {
                         path.0.len() - 1,
                         path
                     )?;
-                    self.produce_defending_fence_info(gs, player, &[*f1, *f2], rv)?;
+                    let mut defend = BTreeSet::new();
+                    self.defending_fences(gs, player, &[*f1, *f2], &mut defend);
                     for ((f1, f2), (gs, path)) in tail {
                         writeln!(
                             rv,
@@ -906,7 +910,15 @@ impl GameState {
                             Action::Fence(*f2),
                             path
                         )?;
-                        self.produce_defending_fence_info(gs, player, &[*f1, *f2], rv)?;
+                        self.defending_fences(gs, player, &[*f1, *f2], &mut defend);
+                    }
+                    // TODO: evaluate those fences before printing.
+                    if !defend.is_empty() {
+                        write!(rv, "Potential defending fences:")?;
+                        for f in defend {
+                            write!(rv, " {}", Action::Fence(f))?;
+                        }
+                        writeln!(rv)?;
                     }
                 }
                 _ => {}
