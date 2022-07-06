@@ -720,17 +720,17 @@ impl GameState {
         }
     }
 
-    pub fn produce_info(&self, rv: &mut impl std::fmt::Write) {
+    pub fn produce_info(&self, rv: &mut impl std::io::Write) -> std::io::Result<()> {
         for player in Player::iterator() {
             let valid_moves = self.valid_moves(player);
-            write!(rv, "{} valid moves:", player).unwrap();
+            write!(rv, "{} valid moves:", player)?;
             for m in valid_moves.into_iter() {
-                write!(rv, " {}", Action::Move(m)).unwrap();
+                write!(rv, " {}", Action::Move(m))?;
             }
-            rv.write_str("\n").unwrap();
+            writeln!(rv)?;
 
             let cur_player_shortest = &self.shortest_path[player as usize];
-            writeln!(rv, "{} shortest path:{}", player, cur_player_shortest).unwrap();
+            writeln!(rv, "{} shortest path:{}", player, cur_player_shortest)?;
 
             // Find the fences that would result in the biggest increase in
             // shortest distance. Note that we first collect all possible
@@ -764,15 +764,13 @@ impl GameState {
                         cur_player_shortest.0.len() - 1,
                         path.0.len() - 1,
                         path
-                    )
-                    .unwrap();
+                    )?;
                     for (f, _, path) in tail {
-                        writeln!(rv, "Or fence {}:{}", Action::Fence(*f), path).unwrap();
+                        writeln!(rv, "Or fence {}:{}", Action::Fence(*f), path)?;
                     }
                 }
                 _ =>
-                    writeln!(rv, "No fence for {} can cause increase in shortest distance", player)
-                        .unwrap(),
+                    writeln!(rv, "No fence for {} can cause increase in shortest distance", player)?,
             }
 
             use std::collections::btree_map::Entry;
@@ -828,8 +826,7 @@ impl GameState {
                         cur_player_shortest.0.len() - 1,
                         path.0.len() - 1,
                         path
-                    )
-                    .unwrap();
+                    )?;
                     for ((f1, f2), path) in tail {
                         writeln!(
                             rv,
@@ -837,12 +834,12 @@ impl GameState {
                             Action::Fence(*f1),
                             Action::Fence(*f2),
                             path
-                        )
-                        .unwrap();
+                        )?;
                     }
                 }
                 _ => {}
             }
         }
+        Ok(())
     }
 }

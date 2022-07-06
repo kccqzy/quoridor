@@ -23,103 +23,127 @@ fn clear_screen() -> std::io::Result<()> {
     w.flush()
 }
 
+fn loop_once(
+    cur: &GameState, current_player: Player,
+    f: impl FnOnce(std::io::StdoutLock<'_>) -> std::io::Result<()>,
+) -> std::io::Result<String> {
+    let mut stdout = std::io::stdout().lock();
+    clear_screen()?;
+    write!(stdout, "{}", cur.draw(true))?;
+    if cur.is_game_complete() {
+        write!(stdout, "Game Over.")?;
+    }
+    f(std::io::stdout().lock())?;
+    writeln!(stdout)?;
+    writeln!(stdout, "Current Player: {}", current_player)?;
+    write!(stdout, "> ")?;
+    stdout.flush()?;
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    input.make_ascii_lowercase();
+
+    Ok(input.trim().into())
+}
+
 fn main() {
-    use std::fmt::Write;
     let new_game = GameState::new();
 
     let mut states = Vec::new();
     let mut current_player = Player::Player1;
-    let mut current_message: String = "New Game".into();
+
+    let mut input = loop_once(&new_game, current_player, |mut i| write!(i, "New Game")).unwrap();
 
     loop {
         let cur = states.last().map_or(&new_game, |(_, g)| g);
 
-        clear_screen().unwrap();
-        std::io::stdout().lock().write_all(cur.draw(true).as_bytes()).unwrap();
-        if cur.is_game_complete() {
-            println!("Game Over.");
-        }
-        println!("{}", current_message.trim());
-        println!("Current Player: {}", current_player);
-
-        current_message.clear();
-
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input).unwrap();
         if !input.is_ascii() {
-            current_message.push_str("not an ASCII string");
+            input =
+                loop_once(cur, current_player, |mut i| write!(i, "Not an ASCII string")).unwrap();
             continue;
         }
-        input.make_ascii_lowercase();
-        let input = input.trim();
         // Check for meta commands.
         if input == "quit" {
             break;
         }
         if input == "undo" {
             if states.is_empty() {
-                current_message.push_str("Cannot undo beyond the first action");
+                input = loop_once(cur, current_player, |mut i| {
+                    write!(i, "Cannot undo beyond the first action")
+                })
+                .unwrap();
             } else {
-                current_message.push_str("Undo!");
                 current_player = current_player.other();
                 states.pop();
+                let cur = states.last().map_or(&new_game, |(_, g)| g);
+                input = loop_once(cur, current_player, |mut i| write!(i, "Undo!")).unwrap();
             }
             continue;
         }
         if input == "info" {
-            cur.produce_info(&mut current_message);
+            input = loop_once(cur, current_player, |mut i| cur.produce_info(&mut i)).unwrap();
             continue;
         }
         if input == "history" {
-            for (i, (act, _)) in states.iter().enumerate() {
-                if i % 2 == 0 {
-                    writeln!(current_message, "{:>2}. {}", 1 + (i >> 1), act).unwrap();
-                } else {
-                    writeln!(current_message, "    {}", act).unwrap();
+            input = loop_once(cur, current_player, |mut i| {
+                for (j, (act, _)) in states.iter().enumerate() {
+                    if j % 2 == 0 {
+                        writeln!(i, "{:2}. {}", 1 + (j >> 1), act)?;
+                    } else {
+                        writeln!(i, "    {}", act)?;
+                    }
                 }
-            }
+                Ok(())
+            })
+            .unwrap();
             continue;
         }
         if input == "restart" {
             states.clear();
             current_player = Player::Player1;
-            current_message.push_str("New Game");
+            input = loop_once(&new_game, current_player, |mut i| write!(i, "Restarted")).unwrap();
             continue;
         }
-        match cur.parse_move_for_player(current_player, input) {
+        match cur.parse_move_for_player(current_player, &input) {
             Err(msg) => {
-                write!(current_message, "I don't recognize that: {}", msg).unwrap();
+                input = loop_once(cur, current_player, |mut i| {
+                    write!(i, "I don't recognize that: {}", msg)
+                })
+                .unwrap();
             }
-            Ok(act) => {
-                eprintln!("Action parsed: {:?}", act);
-                match cur.perform_action(current_player, act) {
-                    Err(e) => write!(current_message, "That move was not valid: {}", match e {
-                        ActionError::FenceOutsideBoundary =>
-                            "the fence was on a border or outside the boundary",
-                        ActionError::NoRemainingFence =>
-                            "the current player has no more remaining fences",
-                        ActionError::OnTopOfExistingFence =>
-                            "the fence would be on top of an existing fence",
-                        ActionError::IntersectExistingFence =>
-                            "the fence would intersect an existing fence",
-                        ActionError::OverlapExistingFence =>
-                            "the fence would overlap an existing fence",
-                        ActionError::GameOver => "the game is already over",
-                        ActionError::InvalidMove => "the location of the move was not valid",
-                        ActionError::PlayerHasNoPath(Player::Player1) =>
-                            "the fence would cause the first player to have no path",
-                        ActionError::PlayerHasNoPath(Player::Player2) =>
-                            "the fence would cause the second player to have no path",
+            Ok(act) => match cur.perform_action(current_player, act) {
+                Err(e) => {
+                    input = loop_once(cur, current_player, |mut i| {
+                        write!(i, "That move was not valid: {}", match e {
+                            ActionError::FenceOutsideBoundary =>
+                                "the fence was on a border or outside the boundary",
+                            ActionError::NoRemainingFence =>
+                                "the current player has no more remaining fences",
+                            ActionError::OnTopOfExistingFence =>
+                                "the fence would be on top of an existing fence",
+                            ActionError::IntersectExistingFence =>
+                                "the fence would intersect an existing fence",
+                            ActionError::OverlapExistingFence =>
+                                "the fence would overlap an existing fence",
+                            ActionError::GameOver => "the game is already over",
+                            ActionError::InvalidMove => "the location of the move was not valid",
+                            ActionError::PlayerHasNoPath(Player::Player1) =>
+                                "the fence would cause the first player to have no path",
+                            ActionError::PlayerHasNoPath(Player::Player2) =>
+                                "the fence would cause the second player to have no path",
+                        })
                     })
-                    .unwrap(),
-                    Ok(new_gs) => {
-                        write!(current_message, "Last action by {}: {}", current_player, act)
-                            .unwrap();
-                        current_player = current_player.other();
-                        states.push((act, new_gs));
-                    }
+                    .unwrap();
                 }
-            }
+                Ok(new_gs) => {
+                    current_player = current_player.other();
+                    input = loop_once(&new_gs, current_player, |mut i| {
+                        write!(i, "Last action by {}: {}", current_player, act)
+                    })
+                    .unwrap();
+                    states.push((act, new_gs));
+                }
+            },
         }
     }
 }
