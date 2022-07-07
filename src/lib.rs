@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fmt::Display;
 use std::rc::Rc;
@@ -329,7 +331,7 @@ impl std::str::FromStr for Direction {
 }
 
 /// A path of coordinates from destination to source.
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
 struct Path(Vec<[u8; 2]>);
 
 impl Display for Path {
@@ -341,7 +343,7 @@ impl Display for Path {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct FenceState {
     /// The fences placed as a bit set.
     fences: [u64; 2],
@@ -590,12 +592,20 @@ where
     rv
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GameState {
     fence_state: Rc<FenceState>,
     location: [[u8; 2]; 2],
     shortest_path: [Rc<Path>; 2],
 }
+
+impl PartialEq for GameState {
+    fn eq(&self, other: &Self) -> bool {
+        self.fence_state == other.fence_state && self.location == other.location
+    }
+}
+
+impl Eq for GameState {}
 
 impl GameState {
     fn recalc_shortest_path(mut self) -> Result<Self, ActionError> {
@@ -740,7 +750,84 @@ impl GameState {
             })
             .collect()
     }
+}
 
+#[derive(Debug)]
+pub struct GameStateTree {
+    current: GameState,
+    /// A map from a fence to the resulting game state. There are two
+    /// because each player can add this fence with minor differences.
+    future: RefCell<BTreeMap<Fence, [std::result::Result<Rc<GameStateTree>, ActionError>; 2]>>,
+}
+
+impl PartialEq for GameStateTree {
+    fn eq(&self, other: &Self) -> bool {
+        self.current == other.current
+    }
+}
+
+impl Eq for GameStateTree {}
+
+impl GameStateTree {
+    fn from_game_state(gs: GameState) -> Rc<GameStateTree> {
+        Rc::new(GameStateTree { current: gs, future: Default::default() })
+    }
+
+    fn insert_or_get_fence(
+        &self, fence: Fence,
+    ) -> [std::result::Result<Rc<GameStateTree>, ActionError>; 2] {
+        self.future
+            .borrow_mut()
+            .entry(fence)
+            .or_insert_with(|| {
+                let first = self.current.perform_action(Player::Player1, Action::Fence(fence));
+                let second = match first {
+                    Ok(ref new_gs) =>
+                        if new_gs.fence_state.fences_remaining[1] > 0 {
+                            let mut other_gs = new_gs.clone();
+                            let fs = Rc::make_mut(&mut other_gs.fence_state);
+                            fs.fences_remaining[0] += 1;
+                            fs.fences_remaining[1] -= 1;
+                            debug_assert_eq!(
+                                Ok(other_gs.clone()),
+                                self.current.perform_action(Player::Player2, Action::Fence(fence))
+                            );
+                            Ok(other_gs)
+                        } else {
+                            Err(ActionError::NoRemainingFence)
+                        },
+                    Err(ActionError::NoRemainingFence) =>
+                        self.current.perform_action(Player::Player2, Action::Fence(fence)),
+                    Err(ref e) => Err(*e),
+                };
+                [first.map(Self::from_game_state), second.map(Self::from_game_state)]
+            })
+            .clone()
+    }
+
+    fn evaluate_fence(&self, fence: Fence, player: Player) -> Option<Rc<GameStateTree>> {
+        self.insert_or_get_fence(fence)[player as usize].clone().ok()
+    }
+
+    fn evaluate_two_fences(
+        &self, [fence1, fence2]: [Fence; 2], player: Player,
+    ) -> Option<Rc<GameStateTree>> {
+        assert_ne!(fence1, fence2);
+        let with_fence1 = self.evaluate_fence(fence1, player);
+        let with_fence2 = self.evaluate_fence(fence2, player);
+        match (with_fence1, with_fence2) {
+            (Some(gst1), Some(gst2)) => {
+                let result = gst1.insert_or_get_fence(fence2);
+                debug_assert_eq!(result, gst2.insert_or_get_fence(fence1));
+                gst2.future.borrow_mut().entry(fence1).or_insert_with(|| result.clone());
+                result[player as usize].clone().ok()
+            }
+            _ => None,
+        }
+    }
+}
+
+impl GameState {
     fn defending_fences(
         &self, fut: &Self, player: Player, proposed_opponent_fences: &[Fence],
         rv: &mut BTreeSet<Fence>,
@@ -785,6 +872,8 @@ impl GameState {
     }
 
     pub fn produce_info(&self, rv: &mut impl std::io::Write) -> std::io::Result<()> {
+        let tree = GameStateTree::from_game_state(self.clone());
+
         for player in Player::iterator() {
             let valid_moves = self.valid_moves(player);
             write!(rv, "{} valid moves:", player)?;
@@ -804,7 +893,7 @@ impl GameState {
                 .find_obstructing_fence(player)
                 .into_iter()
                 .filter_map(|f| {
-                    self.perform_action(player.other(), Action::Fence(f)).ok().map(|s| (f, s))
+                    tree.evaluate_fence(f, player.other()).map(|gst| (f, gst.current.clone()))
                 })
                 .map(|(act, gs)| {
                     let p = gs.shortest_path[player as usize].clone();
@@ -844,43 +933,29 @@ impl GameState {
                     writeln!(rv, "No fence for {} can cause increase in shortest distance", player)?,
             }
 
-            use std::collections::btree_map::Entry;
-            use std::collections::BTreeMap;
             let mut worst_two_fences: BTreeMap<(Fence, Fence), (GameState, Rc<Path>)> =
                 BTreeMap::new();
 
             for (first_fence, gs, _) in fences.into_iter() {
-                let second_fences = gs.find_obstructing_fence(player);
-                for second_fence in second_fences {
+                for second_fence in gs.find_obstructing_fence(player) {
                     let two_fences = match first_fence.cmp(&second_fence) {
                         Ordering::Less => (first_fence, second_fence),
                         Ordering::Equal => continue,
                         Ordering::Greater => (second_fence, first_fence),
                     };
-                    match worst_two_fences.entry(two_fences) {
-                        Entry::Vacant(v) => {
-                            v.insert(
-                                match gs.perform_action(player.other(), Action::Fence(second_fence))
-                                {
-                                    Ok(new_gs) => {
-                                        let p = new_gs.shortest_path[player as usize].clone();
-                                        (new_gs, p)
-                                    }
-                                    Err(_) => continue,
-                                },
-                            );
-                        }
-                        Entry::Occupied(o) => debug_assert_eq!(
-                            o.get().1 .0,
-                            gs.perform_action(player, Action::Fence(second_fence))
-                                .expect(
-                                    "internal error: two fences were previously determined to be \
-                                     valid but are now invalid"
+                    worst_two_fences.extend(
+                        tree.evaluate_two_fences([first_fence, second_fence], player.other()).map(
+                            |gst| {
+                                (
+                                    two_fences,
+                                    (
+                                        gst.current.clone(),
+                                        gst.current.shortest_path[player as usize].clone(),
+                                    ),
                                 )
-                                .shortest_path[player as usize]
-                                .0
+                            },
                         ),
-                    }
+                    );
                 }
             }
             let worst_two_fences =
