@@ -592,6 +592,13 @@ where
     rv
 }
 
+fn min_by_key_with_ties<It: Iterator, B: Ord, F>(it: It, mut f: F) -> Vec<It::Item>
+where
+    F: FnMut(&It::Item) -> B,
+{
+    max_by_key_with_ties(it, |e| std::cmp::Reverse(f(e)))
+}
+
 #[derive(Debug, Clone)]
 pub struct GameState {
     fence_state: Rc<FenceState>,
@@ -828,7 +835,7 @@ impl GameStateTree {
 }
 
 impl GameState {
-    fn defending_fences(
+    fn get_potential_defending_fences(
         &self, fut: &Self, player: Player, proposed_opponent_fences: &[Fence],
         rv: &mut BTreeSet<Fence>,
     ) {
@@ -871,6 +878,67 @@ impl GameState {
         }
     }
 
+    /// Produce an evaluation of a single obstructing fence, i.e. a fence that
+    /// would cause the current player's shortest path to increase.
+    fn obstructing_fence_evaluation(
+        &self, tree: &GameStateTree, player: Player,
+    ) -> Vec<(Fence, GameState, Rc<Path>)> {
+        self.find_obstructing_fence(player)
+            .into_iter()
+            .filter_map(|f| {
+                tree.evaluate_fence(f, player.other()).map(|gst| (f, gst.current.clone()))
+            })
+            .map(|(act, gs)| {
+                let p = gs.shortest_path[player as usize].clone();
+                (act, gs, p)
+            })
+            .collect::<Vec<_>>()
+    }
+
+    /// Produce an evaluation of two obstructing fences, i.e. two fences that
+    /// together would cause the current player's shortest path to increase.
+    fn obstructing_two_fence_evaluation(
+        tree: &GameStateTree, player: Player, fences: Vec<(Fence, GameState, Rc<Path>)>,
+    ) -> BTreeMap<(Fence, Fence), (GameState, Rc<Path>)> {
+        let mut rv: BTreeMap<(Fence, Fence), (GameState, Rc<Path>)> = BTreeMap::new();
+
+        for (first_fence, gs, _) in fences.into_iter() {
+            for second_fence in gs.find_obstructing_fence(player) {
+                let two_fences = match first_fence.cmp(&second_fence) {
+                    Ordering::Less => (first_fence, second_fence),
+                    Ordering::Equal => continue,
+                    Ordering::Greater => (second_fence, first_fence),
+                };
+                rv.extend(
+                    tree.evaluate_two_fences([first_fence, second_fence], player.other()).map(
+                        |gst| {
+                            (
+                                two_fences,
+                                (
+                                    gst.current.clone(),
+                                    gst.current.shortest_path[player as usize].clone(),
+                                ),
+                            )
+                        },
+                    ),
+                );
+            }
+        }
+        rv
+    }
+
+    fn evaluate_defending_fences<K>(
+        tree: &GameStateTree, player: Player, defend: BTreeSet<Fence>, cur_worst_path: &Path,
+        eval_fn: impl Fn(&GameStateTree) -> Option<(K, Rc<Path>)>,
+    ) -> Vec<(Fence, (K, Rc<Path>))> {
+        let defend = defend
+            .into_iter()
+            .filter_map(|df| tree.evaluate_fence(df, player).map(|gst| (df, gst)))
+            .filter_map(|(df, gst)| eval_fn(&gst).map(|v| (df, v)))
+            .filter(|(_, (_, p))| p.0.len() < cur_worst_path.0.len());
+        min_by_key_with_ties(defend, |(_, (_, p))| p.0.len())
+    }
+
     pub fn produce_info(&self, rv: &mut impl std::io::Write) -> std::io::Result<()> {
         let tree = GameStateTree::from_game_state(self.clone());
 
@@ -886,20 +954,12 @@ impl GameState {
             writeln!(rv, "{} shortest path:{}", player, cur_player_shortest)?;
 
             // Find the fences that would result in the biggest increase in
-            // shortest distance. Note that we first collect all possible
-            // fences. This is because later on, when calculating the two worst
-            // fences, each individual among the pair might not be the worst.
-            let fences = self
-                .find_obstructing_fence(player)
-                .into_iter()
-                .filter_map(|f| {
-                    tree.evaluate_fence(f, player.other()).map(|gst| (f, gst.current.clone()))
-                })
-                .map(|(act, gs)| {
-                    let p = gs.shortest_path[player as usize].clone();
-                    (act, gs, p)
-                })
-                .collect::<Vec<_>>();
+            // shortest distance.
+            //
+            // Note that we first collect all possible fences. This is because
+            // later on, when calculating the two worst fences, each individual
+            // among the pair might not be the worst.
+            let fences = self.obstructing_fence_evaluation(&tree, player);
             let worst_fences = max_by_key_with_ties(fences.iter(), |(_, _, p)| p.0.len());
 
             match worst_fences.split_first() {
@@ -915,51 +975,43 @@ impl GameState {
                         path
                     )?;
                     let mut defend = BTreeSet::new();
-                    self.defending_fences(gs, player, &[*f], &mut defend);
+                    self.get_potential_defending_fences(gs, player, &[*f], &mut defend);
                     for (f, gs, path) in tail {
                         writeln!(rv, "Or fence {}:{}", Action::Fence(*f), path)?;
-                        self.defending_fences(gs, player, &[*f], &mut defend);
+                        self.get_potential_defending_fences(gs, player, &[*f], &mut defend);
                     }
-                    // TODO: evaluate those fences before printing.
-                    if !defend.is_empty() {
-                        write!(rv, "Potential defending fences:")?;
-                        for f in defend {
-                            write!(rv, " {}", Action::Fence(f))?;
-                        }
-                        writeln!(rv)?;
+
+                    // Evaluate defending fences.
+                    for (df, (wf, p)) in
+                        Self::evaluate_defending_fences(&tree, player, defend, path, |gst| {
+                            gst.current
+                                .obstructing_fence_evaluation(gst, player)
+                                .into_iter()
+                                .max_by_key(|(_, _, p)| p.0.len())
+                                .map(|(wf, _, p)| (wf, p))
+                        })
+                    {
+                        writeln!(
+                            rv,
+                            "Potential defending fence {} because afterwards, the worst fence \
+                             (e.g. {}) will make the shortest distance {} (currently {}), better \
+                             than {}",
+                            Action::Fence(df),
+                            Action::Fence(wf),
+                            p.0.len() - 1,
+                            cur_player_shortest.0.len() - 1,
+                            path.0.len() - 1
+                        )?;
                     }
                 }
                 _ =>
                     writeln!(rv, "No fence for {} can cause increase in shortest distance", player)?,
             }
 
-            let mut worst_two_fences: BTreeMap<(Fence, Fence), (GameState, Rc<Path>)> =
-                BTreeMap::new();
-
-            for (first_fence, gs, _) in fences.into_iter() {
-                for second_fence in gs.find_obstructing_fence(player) {
-                    let two_fences = match first_fence.cmp(&second_fence) {
-                        Ordering::Less => (first_fence, second_fence),
-                        Ordering::Equal => continue,
-                        Ordering::Greater => (second_fence, first_fence),
-                    };
-                    worst_two_fences.extend(
-                        tree.evaluate_two_fences([first_fence, second_fence], player.other()).map(
-                            |gst| {
-                                (
-                                    two_fences,
-                                    (
-                                        gst.current.clone(),
-                                        gst.current.shortest_path[player as usize].clone(),
-                                    ),
-                                )
-                            },
-                        ),
-                    );
-                }
-            }
+            let two_fences = Self::obstructing_two_fence_evaluation(&tree, player, fences);
             let worst_two_fences =
-                max_by_key_with_ties(worst_two_fences.into_iter(), |(_, (_, p))| p.0.len());
+                max_by_key_with_ties(two_fences.into_iter(), |(_, (_, p))| p.0.len());
+
             match worst_two_fences.split_first() {
                 Some((((f1, f2), (gs, path)), tail))
                     if path.0.len() > cur_player_shortest.0.len() =>
@@ -976,7 +1028,7 @@ impl GameState {
                         path
                     )?;
                     let mut defend = BTreeSet::new();
-                    self.defending_fences(gs, player, &[*f1, *f2], &mut defend);
+                    self.get_potential_defending_fences(gs, player, &[*f1, *f2], &mut defend);
                     for ((f1, f2), (gs, path)) in tail {
                         writeln!(
                             rv,
@@ -985,15 +1037,31 @@ impl GameState {
                             Action::Fence(*f2),
                             path
                         )?;
-                        self.defending_fences(gs, player, &[*f1, *f2], &mut defend);
+                        self.get_potential_defending_fences(gs, player, &[*f1, *f2], &mut defend);
                     }
-                    // TODO: evaluate those fences before printing.
-                    if !defend.is_empty() {
-                        write!(rv, "Potential defending fences:")?;
-                        for f in defend {
-                            write!(rv, " {}", Action::Fence(f))?;
-                        }
-                        writeln!(rv)?;
+
+                    // Evaluate defending fences.
+                    for (df, ((wf1, wf2), p)) in
+                        Self::evaluate_defending_fences(&tree, player, defend, path, |gst| {
+                            let fences = gst.current.obstructing_fence_evaluation(gst, player);
+                            Self::obstructing_two_fence_evaluation(&gst, player, fences)
+                                .into_iter()
+                                .max_by_key(|(_, (_, p))| p.0.len())
+                                .map(|(wfs, (_, p))| (wfs, p))
+                        })
+                    {
+                        writeln!(
+                            rv,
+                            "Potential defending fence {} because afterwards, the worst two \
+                             fences (e.g. {}+{}) will make the shortest distance {} (currently \
+                             {}), better than {}",
+                            Action::Fence(df),
+                            Action::Fence(wf1),
+                            Action::Fence(wf2),
+                            p.0.len() - 1,
+                            cur_player_shortest.0.len() - 1,
+                            path.0.len() - 1
+                        )?;
                     }
                 }
                 _ => {}
