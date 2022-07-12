@@ -149,7 +149,7 @@ pub fn draw_unicode_box(
 }
 
 #[cfg(test)]
-mod tests {
+mod draw_tests {
     use super::*;
 
     #[test]
@@ -1068,5 +1068,56 @@ impl GameState {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod gs_tests {
+    use super::*;
+
+    fn run_trace(trace: &[&'static str]) {
+        let mut gs = GameState::new();
+        let mut cur_player = Player::Player1;
+        let mut msg = Vec::new();
+        for action_str in trace.iter() {
+            let action = gs.parse_move_for_player(cur_player, action_str).unwrap();
+            gs = gs.perform_action(cur_player, action).unwrap();
+            gs.produce_info(&mut msg).unwrap();
+            msg.clear();
+            cur_player = cur_player.other();
+        }
+    }
+
+    #[test]
+    fn game1_trace() {
+        run_trace(&["e2", "e8", "e3", "e7v", "e4", "e5v", "e5", "d7h"])
+    }
+
+    #[test]
+    fn game2_trace() {
+        run_trace(&[
+            "e2", "e8", "e3", "e4h", "f3", "d8", "c8h", "f4v", "d9v", "c8", "a4h", "b8", "c4h",
+            "e3h", "c3v", "e7v", "e5v", "d6h", "b7v", "b7", "e3", "b6", "d3", "b5", "d2", "c5",
+            "e2", "c6", "f2", "d6", "g2", "e6", "g3", "g4h", "d7h", "h3v", "f2v", "d6", "g2",
+            "h5h", "g1", "c6", "h1", "c7", "i1", "d7", "i2", "e7", "i3", "e8", "i4", "f8", "h4",
+            "g8", "g4", "g6h", "f6v", "h8", "g5", "h7h",
+        ])
+    }
+
+    #[test]
+    fn game3_trace() {
+        run_trace(&["e2", "e8", "e3", "e4h", "f3", "d8", "c8h", "f4v", "d9v", "c8", "f2v"])
+    }
+
+    #[test]
+    fn game4_trace() {
+        run_trace(&[
+            "e2", "e8", "d8v", "e7", "e7h", "f7", "e3", "e4h", "g7h", "g7", "h5h", "g8", "d3",
+            "c4h", "c3", "f6v", "b3", "a4h", "f5h", "g9", "c3", "e9h", "d3", "f3v", "e3", "f9",
+            "e2", "e9", "f2", "e2h", "e2", "d9", "d2", "c2h", "c2", "d8", "b2", "d7", "c7h", "c7",
+            "b8v", "c8", "b9h", "d8", "b1", "d9", "c1", "c9", "d1", "b9", "e1", "a9", "f1", "a8",
+            "g1", "a7", "g2", "a6", "g3", "b6", "g4", "c6", "f4", "c5", "e4", "c4", "e5", "d4",
+            "d5v", "c6v", "e6", "d5", "g2h", "a6h",
+        ])
     }
 }
