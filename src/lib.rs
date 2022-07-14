@@ -949,7 +949,7 @@ impl<'a> FenceStateSimulation<'a> {
 }
 
 impl GameState {
-    pub fn produce_info(&self, rv: &mut impl std::io::Write) -> std::io::Result<()> {
+    pub fn produce_info(&self, rv: &mut dyn std::io::Write) -> std::io::Result<()> {
         let mut sim = FenceStateSimulation::from_game_state(self);
 
         for player in Player::iterator() {
